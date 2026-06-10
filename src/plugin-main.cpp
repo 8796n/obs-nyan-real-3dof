@@ -108,6 +108,12 @@ constexpr uint16_t ROKID_VID = 0x04D2;
 // Rokid packet types on the vendor HID interface (64-byte fixed packets).
 constexpr uint8_t ROKID_PKT_SENSOR = 4;
 constexpr uint8_t ROKID_PKT_COMBINED = 17;
+constexpr uint16_t VITURE_VID = 0x35CA;
+// VITURE 64-byte packets: FF FC = IMU data, FF FE = MCU command; command
+// 0x15 with payload 1/0 starts/stops the fused-euler stream.
+constexpr uint8_t VITURE_HDR_IMU = 0xFC;
+constexpr uint8_t VITURE_HDR_CMD = 0xFE;
+constexpr uint16_t VITURE_CMD_IMU = 0x15;
 constexpr uint8_t AIR_MSG_START_IMU_DATA = 0x19;
 constexpr uint8_t AIR_MSG_GET_STATIC_ID = 0x1A;
 // RayNeo HID protocol, mirroring xrealonenet/3dof/js/rayneo_driver.js.
@@ -159,6 +165,9 @@ constexpr float MOUNT_X_DEG_MOVERIO = 0.0f;
 // our convention was confirmed on Max hardware.
 constexpr float MOUNT_X_DEG_ROKID_MAX = -4.0f;
 constexpr float MOUNT_X_DEG_ROKID_AIR = -1.3f;
+// XRLinuxDriver's pitch adjustments for the VITURE families.
+constexpr float MOUNT_X_DEG_VITURE_ONE = 6.0f;
+constexpr float MOUNT_X_DEG_VITURE_PRO = 3.0f;
 
 enum class imu_transport : int {
 	none = 0,
@@ -167,6 +176,7 @@ enum class imu_transport : int {
 	rayneo_hid = 3,
 	sensor_api = 4, // Windows Sensor API (HID sensor collections)
 	rokid_hid = 5,
+	viture_hid = 6, // fused euler angles over vendor HID
 };
 
 // Device identity. HID detection resolves a present USB device into a 1-based
@@ -236,6 +246,8 @@ static transport_traits traits_for(imu_transport t)
 		return {"transport.sensor_api", false, false, true};
 	case imu_transport::rokid_hid:
 		return {"transport.rokid_hid", false, true, false};
+	case imu_transport::viture_hid:
+		return {"transport.viture_hid", false, true, false};
 	case imu_transport::none:
 	default:
 		return {"transport.none", false, false, false};
@@ -292,6 +304,19 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 	const model_profile rokid_air = {imu_transport::rokid_hid,
 					 MOUNT_X_DEG_ROKID_AIR, 43.0f, 1920,
 					 1080, "Rokid Air"};
+	// VITURE glasses fuse orientation on-board and stream euler angles
+	// over a vendor HID interface after an enable command. FOV and pitch
+	// adjustments follow XRLinuxDriver's metadata (One 40 deg / +6 deg,
+	// Pro 43 deg / +3 deg).
+	const model_profile viture_one = {imu_transport::viture_hid,
+					  MOUNT_X_DEG_VITURE_ONE, 40.0f, 1920,
+					  1080, "VITURE One"};
+	const model_profile viture_one_lite = {imu_transport::viture_hid,
+					       MOUNT_X_DEG_VITURE_ONE, 40.0f,
+					       1920, 1080, "VITURE One Lite"};
+	const model_profile viture_pro = {imu_transport::viture_hid,
+					  MOUNT_X_DEG_VITURE_PRO, 43.0f, 1920,
+					  1080, "VITURE Pro"};
 
 	out.push_back({XREAL_VID, 0x0435, L"", one_pro});
 	out.push_back({XREAL_VID, 0x0436, L"", one_pro});
@@ -311,6 +336,14 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 	out.push_back({ROKID_VID, 0x162F, L"Max", rokid_max});
 	out.push_back({ROKID_VID, 0x162F, L"", rokid_air});
 	out.push_back({ROKID_VID, 0x0000, L"Rokid", rokid_max});
+	out.push_back({VITURE_VID, 0x1011, L"", viture_one});
+	out.push_back({VITURE_VID, 0x1013, L"", viture_one});
+	out.push_back({VITURE_VID, 0x1017, L"", viture_one});
+	out.push_back({VITURE_VID, 0x1015, L"", viture_one_lite});
+	out.push_back({VITURE_VID, 0x101B, L"", viture_one_lite});
+	out.push_back({VITURE_VID, 0x1019, L"", viture_pro});
+	out.push_back({VITURE_VID, 0x101D, L"", viture_pro});
+	out.push_back({VITURE_VID, 0x0000, L"VITURE", viture_one});
 }
 
 struct hid_interface_info {
@@ -658,6 +691,12 @@ static quatd quat_from_yaw_y(double rad)
 	return {std::cos(h), 0.0, std::sin(h), 0.0};
 }
 
+static quatd quat_from_rot_z(double rad)
+{
+	const double h = 0.5 * rad;
+	return {std::cos(h), 0.0, 0.0, std::sin(h)};
+}
+
 static vec3d rotate_vector(quatd q, vec3d v)
 {
 	const double tx = 2.0 * (q.y * v.z - q.z * v.y);
@@ -770,6 +809,14 @@ static float read_f32_le(const uint8_t *p)
 	uint32_t u = read_u32_le(p);
 	float f = 0.0f;
 	std::memcpy(&f, &u, sizeof(f));
+	return f;
+}
+
+static float read_f32_be(const uint8_t *p)
+{
+	const uint8_t b[4] = {p[3], p[2], p[1], p[0]};
+	float f = 0.0f;
+	std::memcpy(&f, b, sizeof(f));
 	return f;
 }
 
@@ -1190,6 +1237,28 @@ public:
 			return;
 		}
 		update(imu);
+	}
+
+	// Devices that fuse orientation on-board (VITURE) bypass gyro
+	// integration and calibration entirely: store the pose, apply the
+	// mount tilt as a frame conjugation via right-multiplication, and
+	// derive omega from successive poses for render-time prediction.
+	void on_external_pose(const quatd &device_q, uint32_t ts_us)
+	{
+		const quatd q = quat_normalize(quat_multiply(device_q, mount_q_));
+		if (is_calibrated_ && last_imu_ts_us_ != 0) {
+			const double dt =
+				elapsed_us32(ts_us, last_imu_ts_us_) / 1e6;
+			if (dt > 1e-4 && dt < 0.2) {
+				quatd dq = quat_multiply(quat_inverse(q_), q);
+				const double s = (dq.w >= 0.0 ? 2.0 : -2.0) / dt;
+				latest_omega_ = {s * dq.x, s * dq.y, s * dq.z};
+			}
+		}
+		q_ = q;
+		last_imu_ts_us_ = ts_us ? ts_us : 1;
+		is_calibrated_ = true;
+		imu_count_++;
 	}
 
 	pose_snapshot snapshot() const
@@ -1876,6 +1945,29 @@ static bool publish_sensor_samples(device_manager *f, const imu_sample *imu,
 		f->tracker.on_mag(*mag);
 	if (imu)
 		f->tracker.on_imu(*imu);
+	f->pose = f->tracker.snapshot();
+	f->pose.connected = true;
+	return true;
+}
+
+// Counterpart of publish_sensor_samples for transports that deliver a fused
+// orientation instead of raw IMU samples (VITURE).
+static bool publish_external_pose(device_manager *f, const quatd &device_q,
+				  uint32_t ts_us)
+{
+	std::lock_guard<std::mutex> lk(f->state_mutex);
+	const model_id m = detected_hid_model(f);
+	if (m == MODEL_UNKNOWN) {
+		f->pose.connected = false;
+		return false;
+	}
+	const int mount_override =
+		f->mount_override_cdeg.load(std::memory_order_relaxed);
+	f->tracker.set_mount_deg(mount_override == INT32_MIN
+					 ? profile_for(m).mount_x_deg
+					 : mount_override / 100.0);
+	f->tracker.set_debug(f->debug_log.load(std::memory_order_relaxed));
+	f->tracker.on_external_pose(device_q, ts_us);
 	f->pose = f->tracker.snapshot();
 	f->pose.connected = true;
 	return true;
@@ -3082,6 +3174,216 @@ static void run_rokid_hid_session(device_manager *f, uint32_t &seen_epoch,
 	std::this_thread::sleep_for(std::chrono::milliseconds(250));
 }
 
+// --- VITURE HID --------------------------------------------------------------
+// VITURE glasses expose two vendor HID interfaces (usage page 0xFF00): MI_00
+// streams IMU packets, MI_01 accepts MCU commands. All packets are 64 bytes:
+// header FF FC = IMU data, FF FE = command; CRC-16-CCITT (poly 0x1021, init
+// 0xFFFF) at offset 2 computed over everything from offset 4; payload length
+// at offset 4 (LE); command id at 0x0E (LE); data at 0x12. Command 0x15 with
+// one data byte starts (1) / stops (0) the fused-euler stream. Protocol facts
+// from bfvogel/viture-webxr-extension and mgschwan/viture_virtual_display;
+// the two sources disagree on the CRC byte order, so commands are sent in
+// both orders (the device ignores packets with a bad CRC and the command is
+// idempotent).
+
+static uint16_t viture_crc16(const uint8_t *data, size_t len)
+{
+	uint16_t crc = 0xFFFF;
+	for (size_t i = 0; i < len; ++i) {
+		crc = static_cast<uint16_t>(crc ^
+					    (static_cast<uint16_t>(data[i]) << 8));
+		for (int b = 0; b < 8; ++b)
+			crc = (crc & 0x8000)
+				      ? static_cast<uint16_t>((crc << 1) ^ 0x1021)
+				      : static_cast<uint16_t>(crc << 1);
+	}
+	return crc;
+}
+
+static std::vector<uint8_t> build_viture_command(uint16_t cmd_id,
+						 const uint8_t *data,
+						 size_t data_len, bool crc_be)
+{
+	std::vector<uint8_t> pkt(64, 0);
+	pkt[0] = 0xFF;
+	pkt[1] = VITURE_HDR_CMD;
+	const uint16_t payload_len = static_cast<uint16_t>(0x0C + data_len);
+	pkt[4] = static_cast<uint8_t>(payload_len & 0xFF);
+	pkt[5] = static_cast<uint8_t>(payload_len >> 8);
+	pkt[0x0E] = static_cast<uint8_t>(cmd_id & 0xFF);
+	pkt[0x0F] = static_cast<uint8_t>(cmd_id >> 8);
+	if (data_len)
+		std::memcpy(&pkt[0x12], data, data_len);
+	const uint16_t crc = viture_crc16(pkt.data() + 4,
+					  static_cast<size_t>(payload_len) + 2);
+	pkt[2] = static_cast<uint8_t>(crc_be ? (crc >> 8) : (crc & 0xFF));
+	pkt[3] = static_cast<uint8_t>(crc_be ? (crc & 0xFF) : (crc >> 8));
+	return pkt;
+}
+
+struct viture_iface {
+	hid_interface_info info;
+	HANDLE h = INVALID_HANDLE_VALUE;
+};
+
+// The MCU interface accepts the command and the IMU interface ignores it, so
+// rather than depending on interface numbers the command goes to every
+// interface, in both CRC byte orders.
+static void viture_send_imu_enable(std::vector<viture_iface> &ifaces,
+				   bool enable)
+{
+	const uint8_t data = enable ? 1 : 0;
+	for (int crc_be = 1; crc_be >= 0; --crc_be) {
+		const auto pkt = build_viture_command(VITURE_CMD_IMU, &data, 1,
+						      crc_be != 0);
+		for (auto &it : ifaces)
+			hid_write_report(it.h, it.info.output_report_len, pkt,
+					 250);
+	}
+}
+
+// Strip the Windows report-id byte if present and decode a FF FC IMU packet
+// into a body->world quaternion. The payload is three big-endian floats in
+// degrees ordered roll, pitch, yaw (official SDK ordering); the composition
+// and signs follow the reference WebXR extension's empirically confirmed
+// mapping.
+static bool decode_viture_packet(const uint8_t *data, size_t len, quatd &out)
+{
+	if (len >= 2 && data[0] == 0x00 && data[1] == 0xFF) {
+		data++;
+		len--;
+	}
+	if (len < 30 || data[0] != 0xFF || data[1] != VITURE_HDR_IMU)
+		return false;
+	const float roll = read_f32_be(data + 18);
+	const float pitch = read_f32_be(data + 22);
+	const float yaw = read_f32_be(data + 26);
+	if (!std::isfinite(roll) || !std::isfinite(pitch) ||
+	    !std::isfinite(yaw) || std::fabs(roll) > 720.0f ||
+	    std::fabs(pitch) > 720.0f || std::fabs(yaw) > 720.0f)
+		return false;
+	const double d2r = PI / 180.0;
+	out = quat_normalize(quat_multiply(
+		quat_from_rot_z(-roll * d2r),
+		quat_multiply(quat_from_yaw_y(yaw * d2r),
+			      quat_from_rot_x(-pitch * d2r))));
+	return true;
+}
+
+// Open every vendor interface of the detected VITURE device, request the IMU
+// stream, and identify the streaming interface by probing for FF FC packets.
+static bool open_viture_hid_stream(std::vector<viture_iface> &ifaces,
+				   size_t &imu_index)
+{
+	for (const auto &info : enumerate_hid_interfaces()) {
+		if (profile_for(info.model).transport !=
+			    imu_transport::viture_hid ||
+		    is_consumer_control_hid(info))
+			continue;
+		HANDLE h = open_hid_path_rw(info.path);
+		if (h != INVALID_HANDLE_VALUE)
+			ifaces.push_back({info, h});
+	}
+	if (ifaces.empty())
+		return false;
+
+	viture_send_imu_enable(ifaces, true);
+	quatd q;
+	std::vector<uint8_t> report;
+	const uint64_t start = os_gettime_ns();
+	while (os_gettime_ns() - start < 1500000000ULL) {
+		for (size_t i = 0; i < ifaces.size(); ++i) {
+			if (hid_read_report(ifaces[i].h,
+					    ifaces[i].info.input_report_len,
+					    report, 50) &&
+			    decode_viture_packet(report.data(), report.size(),
+						 q)) {
+				imu_index = i;
+				return true;
+			}
+		}
+	}
+	for (auto &it : ifaces)
+		CloseHandle(it.h);
+	ifaces.clear();
+	return false;
+}
+
+static void run_viture_hid_session(device_manager *f, uint32_t &seen_epoch,
+				   uint64_t &last_detect_ns)
+{
+	std::vector<viture_iface> ifaces;
+	size_t imu_index = 0;
+	if (!open_viture_hid_stream(ifaces, imu_index)) {
+		f->connected.store(false, std::memory_order_relaxed);
+		publish_pose(f, false);
+		if (f->debug_log.load(std::memory_order_relaxed))
+			blog(LOG_WARNING,
+			     "[obs-nyan-real-3dof] VITURE HID connect failed");
+		std::this_thread::sleep_for(std::chrono::milliseconds(500));
+		return;
+	}
+
+	f->connected.store(true, std::memory_order_relaxed);
+	publish_pose(f, true);
+	if (f->debug_log.load(std::memory_order_relaxed))
+		blog(LOG_INFO,
+		     "[obs-nyan-real-3dof] VITURE HID connected "
+		     "(interfaces=%u, imu=%u)",
+		     static_cast<unsigned>(ifaces.size()),
+		     static_cast<unsigned>(imu_index));
+
+	std::vector<uint8_t> report;
+	uint64_t last_rx_ns = os_gettime_ns();
+	uint64_t last_nudge_ns = last_rx_ns;
+	rate_log_state rate_log;
+
+	while (!f->stop.load(std::memory_order_relaxed) &&
+	       f->connect_enabled.load(std::memory_order_relaxed) &&
+	       seen_epoch == f->reconnect_epoch.load(std::memory_order_relaxed)) {
+		refresh_detected_model(f, last_detect_ns);
+		if (!hid_device_ready(f) ||
+		    detected_transport_for(f) != imu_transport::viture_hid)
+			break;
+		const uint64_t now_ns = os_gettime_ns();
+		if (now_ns - last_rx_ns > 3000000000ULL) {
+			if (f->debug_log.load(std::memory_order_relaxed))
+				blog(LOG_WARNING,
+				     "[obs-nyan-real-3dof] VITURE HID stream "
+				     "stalled (no samples for 3 s); reconnecting");
+			break;
+		}
+		// Re-request the stream if it goes quiet (e.g. after the
+		// glasses resume from standby).
+		if (now_ns - last_rx_ns > 1200000000ULL &&
+		    now_ns - last_nudge_ns > 1200000000ULL) {
+			last_nudge_ns = now_ns;
+			viture_send_imu_enable(ifaces, true);
+		}
+
+		if (!hid_read_report(ifaces[imu_index].h,
+				     ifaces[imu_index].info.input_report_len,
+				     report, 250))
+			continue;
+		quatd q;
+		if (!decode_viture_packet(report.data(), report.size(), q))
+			continue;
+		last_rx_ns = os_gettime_ns();
+		publish_external_pose(f, q, now_us32());
+		maybe_log_sensor_rate(f, rate_log, "VITURE HID");
+	}
+
+	viture_send_imu_enable(ifaces, false);
+	for (auto &it : ifaces)
+		CloseHandle(it.h);
+	f->connected.store(false, std::memory_order_relaxed);
+	publish_pose(f, false);
+	if (f->debug_log.load(std::memory_order_relaxed))
+		blog(LOG_WARNING, "[obs-nyan-real-3dof] VITURE HID disconnected");
+	seen_epoch = f->reconnect_epoch.load(std::memory_order_relaxed);
+	std::this_thread::sleep_for(std::chrono::milliseconds(250));
+}
+
 static void worker_fn(device_manager *f)
 {
 	uint32_t seen_epoch = f->reconnect_epoch.load(std::memory_order_relaxed);
@@ -3113,6 +3415,9 @@ static void worker_fn(device_manager *f)
 			break;
 		case imu_transport::rokid_hid:
 			run_rokid_hid_session(f, seen_epoch, last_detect_ns);
+			break;
+		case imu_transport::viture_hid:
+			run_viture_hid_session(f, seen_epoch, last_detect_ns);
 			break;
 		case imu_transport::none:
 		default:
@@ -4781,6 +5086,10 @@ static bool parse_transport(const char *s, imu_transport &out)
 		out = imu_transport::rokid_hid;
 		return true;
 	}
+	if (_stricmp(s, "viture_hid") == 0 || _stricmp(s, "viture") == 0) {
+		out = imu_transport::viture_hid;
+		return true;
+	}
 	return false;
 }
 
@@ -4955,6 +5264,13 @@ static void append_builtin_glasses_display_ids(
 	rokid.edid_vendor = nyan_real_pnp_vendor_word("LBT");
 	rokid.name_contains = "Rokid";
 	out.push_back(rokid);
+
+	// VITURE panels report the generic CVT vendor id with "VITURE" as the
+	// monitor name (VITURE One = CVT 0x3132), so qualify by name.
+	nyan_real_glasses_display_id viture;
+	viture.edid_vendor = nyan_real_pnp_vendor_word("CVT");
+	viture.name_contains = "VITURE";
+	out.push_back(viture);
 }
 
 // Build the device registry once, before the worker thread and the dock start
