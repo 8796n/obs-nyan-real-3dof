@@ -21,6 +21,7 @@ find_package(Qt6 COMPONENTS Widgets QUIET)
 add_library(obs-nyan-real-3dof MODULE)
 target_sources(obs-nyan-real-3dof PRIVATE
   src/plugin-main.cpp
+  src/cursor_fence.cpp
   src/device_manager.cpp
   src/device_registry.cpp
   src/hid_io.cpp
