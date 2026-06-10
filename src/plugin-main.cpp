@@ -16,6 +16,9 @@
 #include <iphlpapi.h>
 #include <hidsdi.h>
 #include <setupapi.h>
+#include <sensorsapi.h>
+#include <sensors.h>
+#include <portabledevicetypes.h>
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -24,10 +27,16 @@
 #include <graphics/vec4.h>
 #include <util/platform.h>
 
+#include <initguid.h>
+// Not in a header we already pull in; value from ntddser.h.
+DEFINE_GUID(GUID_DEVINTERFACE_COMPORT, 0x86e0d1e0, 0x8089, 0x11d0, 0x9c, 0xe4,
+	    0x08, 0x00, 0x3e, 0x30, 0x1f, 0x73);
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -69,9 +78,12 @@
 #ifndef NYAN_REAL_3DOF_VERSION
 #define NYAN_REAL_3DOF_VERSION "0.0.0-nocmake"
 #endif
+#ifndef NYAN_REAL_3DOF_BUILD_TIME
+#define NYAN_REAL_3DOF_BUILD_TIME __DATE__ " " __TIME__
+#endif
 
 #define BUILD_INFO \
-	("obs-nyan-real-3dof " NYAN_REAL_3DOF_VERSION "  (built " __DATE__ " " __TIME__ ")")
+	("obs-nyan-real-3dof " NYAN_REAL_3DOF_VERSION "  (built " NYAN_REAL_3DOF_BUILD_TIME ")")
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-nyan-real-3dof", "en-US")
@@ -91,6 +103,7 @@ constexpr uint32_t KIND_MAG = 4;
 constexpr uint16_t XREAL_VID = 0x3318;
 constexpr uint16_t ASUS_VID = 0x0B05;
 constexpr uint16_t RAYNEO_VID = 0x1BBB;
+constexpr uint16_t EPSON_VID = 0x04B8;
 constexpr uint8_t AIR_MSG_START_IMU_DATA = 0x19;
 constexpr uint8_t AIR_MSG_GET_STATIC_ID = 0x1A;
 // RayNeo HID protocol, mirroring xrealonenet/3dof/js/rayneo_driver.js.
@@ -136,12 +149,14 @@ constexpr float MOUNT_X_DEG_ONE_STANDARD = 180.0f;
 constexpr float MOUNT_X_DEG_ONE_PRO = -150.0f;
 constexpr float MOUNT_X_DEG_AIR = 0.0f;
 constexpr float MOUNT_X_DEG_RAYNEO = -20.0f;
+constexpr float MOUNT_X_DEG_MOVERIO = 0.0f;
 
 enum class imu_transport : int {
 	none = 0,
 	one_bridge_tcp = 1,
 	air_hid = 2,
 	rayneo_hid = 3,
+	sensor_api = 4, // Windows Sensor API (HID sensor collections)
 };
 
 // Device identity. HID detection resolves a present USB device into a 1-based
@@ -192,20 +207,26 @@ struct transport_traits {
 	const char *name_key;       // locale key for the transport display name
 	bool uses_network_endpoint; // transport reads the ip/port settings
 	bool hid_imu_stream;        // IMU streams over HID input reports
+	bool display_brightness;    // brightness set over the serial command port
 };
 
 static transport_traits traits_for(imu_transport t)
 {
 	switch (t) {
 	case imu_transport::one_bridge_tcp:
-		return {"transport.one_bridge_tcp", true, false};
+		return {"transport.one_bridge_tcp", true, false, false};
 	case imu_transport::air_hid:
-		return {"transport.air_hid", false, true};
+		return {"transport.air_hid", false, true, false};
 	case imu_transport::rayneo_hid:
-		return {"transport.rayneo_hid", false, true};
+		return {"transport.rayneo_hid", false, true, false};
+	case imu_transport::sensor_api:
+		// IMU streams through the Sensor API rather than raw HID
+		// reports. MOVERIO has no hardware brightness control; the
+		// dock exposes it through the device's serial command port.
+		return {"transport.sensor_api", false, false, true};
 	case imu_transport::none:
 	default:
-		return {"transport.none", false, false};
+		return {"transport.none", false, false, false};
 	}
 }
 
@@ -239,6 +260,12 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 	const model_profile rayneo = {imu_transport::rayneo_hid,
 				      MOUNT_X_DEG_RAYNEO, 46.0f, 1920, 1080,
 				      "RayNeo Air"};
+	// EPSON MOVERIO BT-40 exposes its IMU as standard HID sensor
+	// collections, read through the Windows Sensor API. 34 deg diagonal
+	// FOV per the published spec.
+	const model_profile bt40 = {imu_transport::sensor_api,
+				    MOUNT_X_DEG_MOVERIO, 34.0f, 1920, 1080,
+				    "EPSON MOVERIO BT-40"};
 
 	out.push_back({XREAL_VID, 0x0435, L"", one_pro});
 	out.push_back({XREAL_VID, 0x0436, L"", one_pro});
@@ -254,6 +281,7 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 	out.push_back({XREAL_VID, 0x0000, L"Air", air});
 	out.push_back({RAYNEO_VID, 0xAF50, L"", rayneo});
 	out.push_back({RAYNEO_VID, 0x0000, L"RayNeo", rayneo});
+	out.push_back({EPSON_VID, 0x0D12, L"", bt40});
 }
 
 struct hid_interface_info {
@@ -390,6 +418,92 @@ static std::vector<hid_interface_info> enumerate_hid_interfaces()
 // Enumerate present HID interfaces and return the first known model. When
 // out_present is non-null, it is filled with every enumerated VID:PID plus usage
 // page for debug logging.
+// Sensor-API devices (e.g. MOVERIO BT-40) expose their IMU as HID sensor
+// collections that the Windows Sensor class driver claims exclusively, so they
+// never appear in the raw-HID enumeration above. Detect them instead by asking
+// the Sensor API whether a gyrometer whose device path carries a registered
+// sensor_api VID/PID is present. out_present (debug) gets the matched id.
+static model_id detect_sensor_api_model(std::string *out_present = nullptr)
+{
+	bool any = false;
+	for (const auto &e : g_device_registry) {
+		if (e.profile.transport == imu_transport::sensor_api) {
+			any = true;
+			break;
+		}
+	}
+	if (!any)
+		return MODEL_UNKNOWN;
+
+	const HRESULT co_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+	const bool co_init = SUCCEEDED(co_hr);
+	ISensorManager *mgr = nullptr;
+	model_id found = MODEL_UNKNOWN;
+	if (SUCCEEDED(CoCreateInstance(CLSID_SensorManager, nullptr,
+				       CLSCTX_INPROC_SERVER,
+				       IID_PPV_ARGS(&mgr))) &&
+	    mgr) {
+		ISensorCollection *col = nullptr;
+		if (SUCCEEDED(mgr->GetSensorsByType(SENSOR_TYPE_GYROMETER_3D,
+						    &col)) &&
+		    col) {
+			ULONG count = 0;
+			col->GetCount(&count);
+			for (ULONG c = 0; c < count && found == MODEL_UNKNOWN;
+			     ++c) {
+				ISensor *s = nullptr;
+				if (FAILED(col->GetAt(c, &s)) || !s)
+					continue;
+				PROPVARIANT pv;
+				PropVariantInit(&pv);
+				std::wstring path;
+				if (SUCCEEDED(s->GetProperty(
+					    SENSOR_PROPERTY_DEVICE_PATH, &pv)) &&
+				    pv.vt == VT_LPWSTR && pv.pwszVal) {
+					path = pv.pwszVal;
+					for (auto &ch : path)
+						ch = static_cast<wchar_t>(
+							std::towlower(ch));
+				}
+				PropVariantClear(&pv);
+				s->Release();
+				if (path.empty())
+					continue;
+				for (size_t i = 0; i < g_device_registry.size();
+				     ++i) {
+					const device_entry &e =
+						g_device_registry[i];
+					if (e.profile.transport !=
+					    imu_transport::sensor_api)
+						continue;
+					wchar_t vp[32];
+					swprintf(vp, 32, L"vid_%04x&pid_%04x",
+						 e.vid, e.pid);
+					if (path.find(vp) !=
+					    std::wstring::npos) {
+						found = static_cast<model_id>(
+							i + 1);
+						if (out_present &&
+						    out_present->size() < 400) {
+							char id[32];
+							snprintf(id, sizeof(id),
+								 "sensorapi:%04X:%04X ",
+								 e.vid, e.pid);
+							*out_present += id;
+						}
+						break;
+					}
+				}
+			}
+			col->Release();
+		}
+		mgr->Release();
+	}
+	if (co_init)
+		CoUninitialize();
+	return found;
+}
+
 static model_id detect_hid_model(std::string *out_present = nullptr)
 {
 	model_id found = MODEL_UNKNOWN;
@@ -403,6 +517,9 @@ static model_id detect_hid_model(std::string *out_present = nullptr)
 		if (found == MODEL_UNKNOWN && info.model != MODEL_UNKNOWN)
 			found = info.model;
 	}
+	// Fall back to the Sensor API for devices that don't surface as raw HID.
+	if (found == MODEL_UNKNOWN)
+		found = detect_sensor_api_model(out_present);
 	return found;
 }
 
@@ -1547,6 +1664,14 @@ struct device_manager {
 	// derives it from the device-info board id). INT32_MIN = no override,
 	// use the registry profile's mount.
 	std::atomic<int> mount_override_cdeg{INT32_MIN};
+	// MOVERIO display brightness over the serial command port.
+	// brightness current: -1 unknown/unavailable, 0-20 level, 50 auto mode.
+	// autobright current: -1 unknown/unavailable, 0 off, 1 on.
+	// requests: -1 none; the sensor_api session consumes and applies them.
+	std::atomic<int> brightness_current{-1};
+	std::atomic<int> brightness_request{-1};
+	std::atomic<int> autobright_current{-1};
+	std::atomic<int> autobright_request{-1};
 	std::atomic<bool> fov_auto{true};
 	std::atomic<int> virtual_source_count{0};
 	std::atomic<float> prediction_ms{10.0f};
@@ -2177,6 +2302,571 @@ static void run_rayneo_hid_session(device_manager *f, uint32_t &seen_epoch,
 	std::this_thread::sleep_for(std::chrono::milliseconds(250));
 }
 
+// --- Windows Sensor API transport (EPSON MOVERIO BT-40) ---------------------
+// The BT-40 exposes its IMU as standard HID sensor collections, so the data is
+// read through the Windows Sensor API instead of a custom protocol (the
+// device's COM port only carries display-control commands such as setbright).
+// Axes per the MOVERIO Basic Function SDK developer's guide: gyro/compass use
+// X-right / Y-up / Z-toward-the-wearer, while the accelerometer alone is
+// inverted (X-left / Y-down / Z-forward), so it is negated into the shared
+// frame.
+
+static bool propvariant_to_double(const PROPVARIANT &pv, double &out)
+{
+	switch (pv.vt) {
+	case VT_R8:
+		out = pv.dblVal;
+		return true;
+	case VT_R4:
+		out = pv.fltVal;
+		return true;
+	case VT_I4:
+		out = pv.lVal;
+		return true;
+	case VT_UI4:
+		out = pv.ulVal;
+		return true;
+	default:
+		return false;
+	}
+}
+
+// Read a 3-axis value from the sensor's latest report. Returns true only when
+// the report timestamp advanced (the API hands back the same report between
+// hardware updates) and all three fields decoded; last_ft100 holds the report
+// FILETIME in 100 ns units for timestamping the sample.
+static bool sensor_read_vec3(ISensor *sensor, const PROPERTYKEY &kx,
+			     const PROPERTYKEY &ky, const PROPERTYKEY &kz,
+			     uint64_t &last_ft100, vec3d &out)
+{
+	ISensorDataReport *report = nullptr;
+	if (FAILED(sensor->GetData(&report)) || !report)
+		return false;
+
+	SYSTEMTIME st = {};
+	FILETIME ft = {};
+	bool fresh = false;
+	if (SUCCEEDED(report->GetTimestamp(&st)) &&
+	    SystemTimeToFileTime(&st, &ft)) {
+		const uint64_t t =
+			(static_cast<uint64_t>(ft.dwHighDateTime) << 32) |
+			ft.dwLowDateTime;
+		fresh = t != last_ft100;
+		if (fresh)
+			last_ft100 = t;
+	}
+
+	bool ok = fresh;
+	if (fresh) {
+		const PROPERTYKEY keys[3] = {kx, ky, kz};
+		double v[3] = {};
+		for (int i = 0; i < 3 && ok; ++i) {
+			PROPVARIANT pv;
+			PropVariantInit(&pv);
+			ok = SUCCEEDED(report->GetSensorValue(keys[i], &pv)) &&
+			     propvariant_to_double(pv, v[i]);
+			PropVariantClear(&pv);
+		}
+		if (ok)
+			out = {v[0], v[1], v[2]};
+	}
+	report->Release();
+	return ok;
+}
+
+static void sensor_request_min_interval(ISensor *sensor)
+{
+	PROPVARIANT pv;
+	PropVariantInit(&pv);
+	ULONG min_ms = 0;
+	if (SUCCEEDED(sensor->GetProperty(SENSOR_PROPERTY_MIN_REPORT_INTERVAL,
+					  &pv)) &&
+	    pv.vt == VT_UI4)
+		min_ms = pv.ulVal;
+	PropVariantClear(&pv);
+
+	IPortableDeviceValues *props = nullptr;
+	if (FAILED(CoCreateInstance(CLSID_PortableDeviceValues, nullptr,
+				    CLSCTX_INPROC_SERVER,
+				    IID_PPV_ARGS(&props))))
+		return;
+	props->SetUnsignedIntegerValue(SENSOR_PROPERTY_CURRENT_REPORT_INTERVAL,
+				       min_ms ? min_ms : 4);
+	IPortableDeviceValues *results = nullptr;
+	sensor->SetProperties(props, &results);
+	if (results)
+		results->Release();
+	props->Release();
+}
+
+// ISensor::GetData can block indefinitely while the device sleeps (MOVERIO
+// mutes its display and stops sensor reports after sitting still), which
+// would also wedge the watchdog. Only call GetData when the sensor reports
+// SENSOR_STATE_READY; GetState is a cheap non-blocking query.
+static bool sensor_is_ready(ISensor *sensor)
+{
+	SensorState state = SENSOR_STATE_ERROR;
+	return SUCCEEDED(sensor->GetState(&state)) &&
+	       state == SENSOR_STATE_READY;
+}
+
+// Pick the sensor of the given type whose device path contains the detected
+// USB identity, so a sensor on another device (laptop IMU etc.) is never used.
+static ISensor *find_device_sensor(ISensorManager *mgr, REFSENSOR_TYPE_ID type,
+				   const std::wstring &vidpid)
+{
+	ISensorCollection *col = nullptr;
+	if (FAILED(mgr->GetSensorsByType(type, &col)) || !col)
+		return nullptr;
+	ULONG count = 0;
+	col->GetCount(&count);
+	ISensor *found = nullptr;
+	for (ULONG i = 0; i < count && !found; ++i) {
+		ISensor *s = nullptr;
+		if (FAILED(col->GetAt(i, &s)) || !s)
+			continue;
+		PROPVARIANT pv;
+		PropVariantInit(&pv);
+		bool match = false;
+		if (SUCCEEDED(s->GetProperty(SENSOR_PROPERTY_DEVICE_PATH, &pv)) &&
+		    pv.vt == VT_LPWSTR && pv.pwszVal) {
+			std::wstring path = pv.pwszVal;
+			for (auto &c : path)
+				c = static_cast<wchar_t>(std::towlower(c));
+			match = path.find(vidpid) != std::wstring::npos;
+		}
+		PropVariantClear(&pv);
+		if (match)
+			found = s;
+		else
+			s->Release();
+	}
+	col->Release();
+	return found;
+}
+
+// --- MOVERIO display-control serial port ------------------------------------
+// The BT-40 family has no hardware brightness control; it accepts the text
+// commands documented in the MOVERIO Basic Function SDK's Windows command
+// reference over a USB-CDC COM port (setbright 0-20 / 50 = auto, getbright).
+
+static bool find_device_com_port(uint16_t vid, uint16_t pid, std::wstring &out)
+{
+	HDEVINFO devs = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_COMPORT, nullptr,
+					     nullptr,
+					     DIGCF_PRESENT |
+						     DIGCF_DEVICEINTERFACE);
+	if (devs == INVALID_HANDLE_VALUE)
+		return false;
+	wchar_t want[32];
+	swprintf(want, 32, L"vid_%04x&pid_%04x", vid, pid);
+	bool found = false;
+	SP_DEVINFO_DATA dev = {};
+	dev.cbSize = sizeof(dev);
+	for (DWORD i = 0; !found && SetupDiEnumDeviceInfo(devs, i, &dev); ++i) {
+		wchar_t inst[512] = L"";
+		if (!SetupDiGetDeviceInstanceIdW(devs, &dev, inst, 512, nullptr))
+			continue;
+		for (wchar_t *p = inst; *p; ++p)
+			*p = static_cast<wchar_t>(std::towlower(*p));
+		if (!wcsstr(inst, want))
+			continue;
+		HKEY key = SetupDiOpenDevRegKey(devs, &dev, DICS_FLAG_GLOBAL, 0,
+						DIREG_DEV, KEY_READ);
+		if (key == INVALID_HANDLE_VALUE)
+			continue;
+		wchar_t port[64] = L"";
+		DWORD len = sizeof(port);
+		DWORD type = 0;
+		if (RegQueryValueExW(key, L"PortName", nullptr, &type,
+				     reinterpret_cast<LPBYTE>(port), &len) ==
+			    ERROR_SUCCESS &&
+		    type == REG_SZ && port[0]) {
+			out = L"\\\\.\\" + std::wstring(port);
+			found = true;
+		}
+		RegCloseKey(key);
+	}
+	SetupDiDestroyDeviceInfoList(devs);
+	return found;
+}
+
+static HANDLE open_moverio_serial(uint16_t vid, uint16_t pid)
+{
+	std::wstring path;
+	if (!find_device_com_port(vid, pid, path))
+		return INVALID_HANDLE_VALUE;
+	HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+			       nullptr, OPEN_EXISTING, 0, nullptr);
+	if (h == INVALID_HANDLE_VALUE)
+		return h;
+	DCB dcb = {};
+	dcb.DCBlength = sizeof(dcb);
+	if (GetCommState(h, &dcb)) {
+		dcb.BaudRate = CBR_115200; // nominal; USB-CDC ignores the rate
+		dcb.ByteSize = 8;
+		dcb.Parity = NOPARITY;
+		dcb.StopBits = ONESTOPBIT;
+		SetCommState(h, &dcb);
+	}
+	COMMTIMEOUTS to = {};
+	to.ReadIntervalTimeout = 50;
+	to.ReadTotalTimeoutConstant = 250;
+	to.WriteTotalTimeoutConstant = 250;
+	SetCommTimeouts(h, &to);
+	PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR);
+	return h;
+}
+
+static bool moverio_serial_command(HANDLE h, const char *cmd, char *reply,
+				   size_t reply_len)
+{
+	char buf[64];
+	const int n = snprintf(buf, sizeof(buf), "%s\r\n", cmd);
+	if (n <= 0)
+		return false;
+	DWORD written = 0;
+	if (!WriteFile(h, buf, static_cast<DWORD>(n), &written, nullptr))
+		return false;
+	if (!reply || reply_len == 0)
+		return true;
+	DWORD got = 0;
+	if (!ReadFile(h, reply, static_cast<DWORD>(reply_len - 1), &got,
+		      nullptr))
+		return false;
+	reply[got] = '\0';
+	return got > 0;
+}
+
+// Query commands reply with a number as text ("0".."20", "50" = auto for
+// getbright; "0"/"1" for getautobright). Framing is undocumented and the
+// device may echo the command line first, so scan for the first digit and
+// retry the read once when only the echo arrived in the first chunk.
+static int moverio_query_value(HANDLE h, const char *cmd, int max_valid)
+{
+	char reply[64] = "";
+	if (!moverio_serial_command(h, cmd, reply, sizeof(reply)))
+		return -1;
+	const char *p = reply;
+	while (*p && !std::isdigit(static_cast<unsigned char>(*p)))
+		++p;
+	char more[32] = "";
+	if (!*p) {
+		DWORD got = 0;
+		if (!ReadFile(h, more, sizeof(more) - 1, &got, nullptr) || !got)
+			return -1;
+		more[got] = '\0';
+		p = more;
+		while (*p && !std::isdigit(static_cast<unsigned char>(*p)))
+			++p;
+		if (!*p)
+			return -1;
+	}
+	const int v = std::atoi(p);
+	return (v >= 0 && v <= max_valid) ? v : -1;
+}
+
+static int moverio_query_brightness(HANDLE h)
+{
+	return moverio_query_value(h, "getbright", 50);
+}
+
+static int moverio_query_autobright(HANDLE h)
+{
+	return moverio_query_value(h, "getautobright", 1);
+}
+
+static void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch,
+				   uint64_t &last_detect_ns)
+{
+	const model_id m = detected_hid_model(f);
+	if (m == MODEL_UNKNOWN)
+		return;
+	const device_entry &entry =
+		g_device_registry[static_cast<size_t>(m) - 1];
+	wchar_t vidpid[32];
+	swprintf(vidpid, 32, L"vid_%04x&pid_%04x", entry.vid, entry.pid);
+
+	const HRESULT co_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+	const bool co_init = SUCCEEDED(co_hr);
+
+	ISensorManager *mgr = nullptr;
+	ISensor *gyro = nullptr;
+	ISensor *accel = nullptr;
+	ISensor *mag = nullptr;
+	if (SUCCEEDED(CoCreateInstance(CLSID_SensorManager, nullptr,
+				       CLSCTX_INPROC_SERVER,
+				       IID_PPV_ARGS(&mgr))) &&
+	    mgr) {
+		gyro = find_device_sensor(mgr, SENSOR_TYPE_GYROMETER_3D, vidpid);
+		accel = find_device_sensor(mgr, SENSOR_TYPE_ACCELEROMETER_3D,
+					   vidpid);
+		mag = find_device_sensor(mgr, SENSOR_TYPE_COMPASS_3D, vidpid);
+	}
+
+	// A sleeping device (display mute by stillness/tap detection) leaves
+	// the sensors enumerable but not READY; treat that as not-connected so
+	// we retry instead of blocking in GetData.
+	if (!gyro || !accel || !sensor_is_ready(gyro)) {
+		if (f->debug_log.load(std::memory_order_relaxed))
+			blog(LOG_WARNING,
+			     "[obs-nyan-real-3dof] Sensor API connect failed "
+			     "(gyro=%d accel=%d ready=%d)",
+			     gyro != nullptr, accel != nullptr,
+			     gyro ? sensor_is_ready(gyro) : 0);
+		if (gyro)
+			gyro->Release();
+		if (accel)
+			accel->Release();
+		if (mag)
+			mag->Release();
+		if (mgr)
+			mgr->Release();
+		if (co_init)
+			CoUninitialize();
+		f->connected.store(false, std::memory_order_relaxed);
+		publish_pose(f, false);
+		std::this_thread::sleep_for(std::chrono::milliseconds(500));
+		return;
+	}
+
+	sensor_request_min_interval(gyro);
+	sensor_request_min_interval(accel);
+	if (mag)
+		sensor_request_min_interval(mag);
+
+	// Require a live gyro sample before declaring the session connected.
+	// A wedged/sleeping device leaves the sensors enumerable and READY but
+	// silent; without this gate the session flaps connected/disconnected
+	// every watchdog period and the dock controls flicker with it.
+	const double deg_to_rad = PI / 180.0;
+	uint64_t gyro_ft100 = 0;
+	vec3d g_latest = {};
+	bool live = false;
+	const uint64_t probe_start = os_gettime_ns();
+	while (!f->stop.load(std::memory_order_relaxed) &&
+	       os_gettime_ns() - probe_start < 1500000000ULL) {
+		if (!sensor_is_ready(gyro)) {
+			std::this_thread::sleep_for(
+				std::chrono::milliseconds(50));
+			continue;
+		}
+		if (sensor_read_vec3(
+			    gyro,
+			    SENSOR_DATA_TYPE_ANGULAR_VELOCITY_X_DEGREES_PER_SECOND,
+			    SENSOR_DATA_TYPE_ANGULAR_VELOCITY_Y_DEGREES_PER_SECOND,
+			    SENSOR_DATA_TYPE_ANGULAR_VELOCITY_Z_DEGREES_PER_SECOND,
+			    gyro_ft100, g_latest)) {
+			live = true;
+			break;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	if (!live) {
+		if (f->debug_log.load(std::memory_order_relaxed))
+			blog(LOG_WARNING,
+			     "[obs-nyan-real-3dof] Sensor API found sensors but "
+			     "no live samples (device asleep or sensor stack "
+			     "wedged); retrying");
+		gyro->Release();
+		accel->Release();
+		if (mag)
+			mag->Release();
+		mgr->Release();
+		if (co_init)
+			CoUninitialize();
+		f->connected.store(false, std::memory_order_relaxed);
+		publish_pose(f, false);
+		std::this_thread::sleep_for(std::chrono::milliseconds(500));
+		return;
+	}
+
+	f->connected.store(true, std::memory_order_relaxed);
+	publish_pose(f, true);
+	if (f->debug_log.load(std::memory_order_relaxed))
+		blog(LOG_INFO,
+		     "[obs-nyan-real-3dof] Sensor API connected (mag=%d)",
+		     mag != nullptr);
+
+	// Display-control serial port for brightness. Optional: the IMU works
+	// without it and the dock disables the brightness row when absent.
+	HANDLE serial = open_moverio_serial(entry.vid, entry.pid);
+	f->brightness_current.store(
+		serial != INVALID_HANDLE_VALUE ? moverio_query_brightness(serial)
+					       : -1,
+		std::memory_order_relaxed);
+	f->autobright_current.store(
+		serial != INVALID_HANDLE_VALUE ? moverio_query_autobright(serial)
+					       : -1,
+		std::memory_order_relaxed);
+	if (f->debug_log.load(std::memory_order_relaxed))
+		blog(LOG_INFO,
+		     "[obs-nyan-real-3dof] MOVERIO serial %s (brightness %d, "
+		     "autobright %d)",
+		     serial != INVALID_HANDLE_VALUE ? "opened" : "not available",
+		     f->brightness_current.load(std::memory_order_relaxed),
+		     f->autobright_current.load(std::memory_order_relaxed));
+	if (serial != INVALID_HANDLE_VALUE &&
+	    f->debug_log.load(std::memory_order_relaxed) &&
+	    f->brightness_current.load(std::memory_order_relaxed) < 0) {
+		// Reply framing is undocumented; dump one raw reply to make
+		// parser failures diagnosable from the log.
+		char raw[64] = "";
+		moverio_serial_command(serial, "getbright", raw, sizeof(raw));
+		for (char *p = raw; *p; ++p)
+			if (!std::isprint(static_cast<unsigned char>(*p)))
+				*p = '.';
+		blog(LOG_INFO, "[obs-nyan-real-3dof] getbright raw reply: '%s'",
+		     raw);
+	}
+
+	uint64_t accel_ft100 = 0;
+	uint64_t mag_ft100 = 0;
+	vec3d a_latest = {};
+	bool have_accel = false;
+	uint32_t seq = 0;
+	uint64_t last_rx_ns = os_gettime_ns();
+	rate_log_state rate_log;
+
+	while (!f->stop.load(std::memory_order_relaxed) &&
+	       f->connect_enabled.load(std::memory_order_relaxed) &&
+	       seen_epoch == f->reconnect_epoch.load(std::memory_order_relaxed)) {
+		refresh_detected_model(f, last_detect_ns);
+		if (!hid_device_ready(f) ||
+		    detected_transport_for(f) != imu_transport::sensor_api)
+			break;
+		const int bright_req = f->brightness_request.exchange(
+			-1, std::memory_order_relaxed);
+		if (bright_req >= 0 && serial != INVALID_HANDLE_VALUE) {
+			char cmd[32];
+			char reply[32] = "";
+			snprintf(cmd, sizeof(cmd), "setbright %d", bright_req);
+			moverio_serial_command(serial, cmd, reply, sizeof(reply));
+			// Re-read instead of trusting the reply framing.
+			const int now_bright = moverio_query_brightness(serial);
+			f->brightness_current.store(
+				now_bright >= 0 ? now_bright : bright_req,
+				std::memory_order_relaxed);
+			if (f->debug_log.load(std::memory_order_relaxed))
+				blog(LOG_INFO,
+				     "[obs-nyan-real-3dof] setbright %d -> "
+				     "reply '%s', getbright %d",
+				     bright_req, reply, now_bright);
+		}
+
+		const int auto_req = f->autobright_request.exchange(
+			-1, std::memory_order_relaxed);
+		if (auto_req >= 0 && serial != INVALID_HANDLE_VALUE) {
+			char cmd[32];
+			char reply[32] = "";
+			snprintf(cmd, sizeof(cmd), "enableautobright %d",
+				 auto_req ? 1 : 0);
+			moverio_serial_command(serial, cmd, reply, sizeof(reply));
+			const int now_auto = moverio_query_autobright(serial);
+			f->autobright_current.store(
+				now_auto >= 0 ? now_auto : auto_req,
+				std::memory_order_relaxed);
+			// Leaving auto mode restores a manual level (and auto
+			// mode reports 50); refresh the slider either way.
+			const int now_bright = moverio_query_brightness(serial);
+			if (now_bright >= 0)
+				f->brightness_current.store(
+					now_bright, std::memory_order_relaxed);
+			if (f->debug_log.load(std::memory_order_relaxed))
+				blog(LOG_INFO,
+				     "[obs-nyan-real-3dof] enableautobright %d "
+				     "-> reply '%s', getautobright %d, "
+				     "getbright %d",
+				     auto_req, reply, now_auto, now_bright);
+		}
+
+		// The sensor objects go quiet rather than erroring when the
+		// device misbehaves; reconnect like the other transports.
+		if (os_gettime_ns() - last_rx_ns > 3000000000ULL) {
+			if (f->debug_log.load(std::memory_order_relaxed))
+				blog(LOG_WARNING,
+				     "[obs-nyan-real-3dof] Sensor API stream "
+				     "stalled (no samples for 3 s); reconnecting");
+			break;
+		}
+
+		// While the device sleeps GetData would block indefinitely;
+		// idle here and let the stall watchdog cycle the session.
+		if (!sensor_is_ready(gyro)) {
+			std::this_thread::sleep_for(
+				std::chrono::milliseconds(50));
+			continue;
+		}
+
+		if (sensor_read_vec3(accel, SENSOR_DATA_TYPE_ACCELERATION_X_G,
+				     SENSOR_DATA_TYPE_ACCELERATION_Y_G,
+				     SENSOR_DATA_TYPE_ACCELERATION_Z_G,
+				     accel_ft100, a_latest))
+			have_accel = true;
+
+		if (sensor_read_vec3(
+			    gyro,
+			    SENSOR_DATA_TYPE_ANGULAR_VELOCITY_X_DEGREES_PER_SECOND,
+			    SENSOR_DATA_TYPE_ANGULAR_VELOCITY_Y_DEGREES_PER_SECOND,
+			    SENSOR_DATA_TYPE_ANGULAR_VELOCITY_Z_DEGREES_PER_SECOND,
+			    gyro_ft100, g_latest) &&
+		    have_accel) {
+			last_rx_ns = os_gettime_ns();
+			imu_sample imu;
+			imu.gx = static_cast<float>(g_latest.x * deg_to_rad);
+			imu.gy = static_cast<float>(g_latest.y * deg_to_rad);
+			imu.gz = static_cast<float>(g_latest.z * deg_to_rad);
+			// The accelerometer frame is the inverse of the
+			// gyro/compass frame on MOVERIO; negate into one frame.
+			imu.ax = static_cast<float>(-a_latest.x);
+			imu.ay = static_cast<float>(-a_latest.y);
+			imu.az = static_cast<float>(-a_latest.z);
+			imu.ts_us = static_cast<uint32_t>(gyro_ft100 / 10);
+			imu.seq = seq++;
+			publish_sensor_samples(f, &imu, nullptr);
+			maybe_log_sensor_rate(f, rate_log, "Sensor API");
+		}
+
+		vec3d mg = {};
+		if (mag &&
+		    sensor_read_vec3(
+			    mag,
+			    SENSOR_DATA_TYPE_MAGNETIC_FIELD_STRENGTH_X_MILLIGAUSS,
+			    SENSOR_DATA_TYPE_MAGNETIC_FIELD_STRENGTH_Y_MILLIGAUSS,
+			    SENSOR_DATA_TYPE_MAGNETIC_FIELD_STRENGTH_Z_MILLIGAUSS,
+			    mag_ft100, mg)) {
+			mag_sample ms;
+			ms.mx = static_cast<float>(mg.x);
+			ms.my = static_cast<float>(mg.y);
+			ms.mz = static_cast<float>(mg.z);
+			ms.temp_c = 0.0f;
+			ms.ts_us = static_cast<uint32_t>(mag_ft100 / 10);
+			ms.seq = seq;
+			publish_sensor_samples(f, nullptr, &ms);
+		}
+
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+
+	if (serial != INVALID_HANDLE_VALUE)
+		CloseHandle(serial);
+	f->brightness_current.store(-1, std::memory_order_relaxed);
+	f->autobright_current.store(-1, std::memory_order_relaxed);
+	gyro->Release();
+	accel->Release();
+	if (mag)
+		mag->Release();
+	mgr->Release();
+	if (co_init)
+		CoUninitialize();
+	f->connected.store(false, std::memory_order_relaxed);
+	publish_pose(f, false);
+	if (f->debug_log.load(std::memory_order_relaxed))
+		blog(LOG_WARNING, "[obs-nyan-real-3dof] Sensor API disconnected");
+	seen_epoch = f->reconnect_epoch.load(std::memory_order_relaxed);
+	std::this_thread::sleep_for(std::chrono::milliseconds(250));
+}
+
 static void worker_fn(device_manager *f)
 {
 	uint32_t seen_epoch = f->reconnect_epoch.load(std::memory_order_relaxed);
@@ -2202,6 +2892,9 @@ static void worker_fn(device_manager *f)
 			break;
 		case imu_transport::rayneo_hid:
 			run_rayneo_hid_session(f, seen_epoch, last_detect_ns);
+			break;
+		case imu_transport::sensor_api:
+			run_sensor_api_session(f, seen_epoch, last_detect_ns);
 			break;
 		case imu_transport::none:
 		default:
@@ -2689,9 +3382,25 @@ public:
 		ip_edit = new QLineEdit(device_group);
 		port_spin = new NoWheelSpinBox(device_group);
 		port_spin->setRange(1, 65535);
+		brightness_spin = new NoWheelDoubleSpinBox(device_group);
+		brightness_spin->setRange(0.0, 20.0);
+		brightness_spin->setDecimals(0);
+		brightness_spin->setSingleStep(1.0);
 		device_form->addRow(QString(), connect_box);
 		device_form->addRow(obs_module_text("ip"), ip_edit);
 		device_form->addRow(obs_module_text("port"), port_spin);
+		brightness_row = make_double_slider(device_group, brightness_spin,
+						    &brightness_slider,
+						    BRIGHTNESS_SLIDER_SCALE);
+		brightness_row->setToolTip(
+			obs_module_text("brightness_tooltip"));
+		device_form->addRow(obs_module_text("brightness"),
+				    brightness_row);
+		autobright_box = new QCheckBox(obs_module_text("autobright"),
+					       device_group);
+		autobright_box->setToolTip(
+			obs_module_text("autobright_tooltip"));
+		device_form->addRow(QString(), autobright_box);
 		projector_button = new QPushButton(
 			obs_module_text("dock.open_projector"), device_group);
 		projector_button->setToolTip(
@@ -2766,6 +3475,21 @@ public:
 
 		QObject::connect(connect_box, &QCheckBox::toggled, this,
 				 [](bool checked) { manager_set_connect_enabled(&g_device, checked); });
+		QObject::connect(brightness_spin,
+				 static_cast<void (QDoubleSpinBox::*)(double)>(
+					 &QDoubleSpinBox::valueChanged),
+				 this, [](double value) {
+					 g_device.brightness_request.store(
+						 static_cast<int>(
+							 std::lround(value)),
+						 std::memory_order_relaxed);
+				 });
+		QObject::connect(autobright_box, &QCheckBox::toggled, this,
+				 [](bool checked) {
+					 g_device.autobright_request.store(
+						 checked ? 1 : 0,
+						 std::memory_order_relaxed);
+				 });
 		QObject::connect(ip_edit, &QLineEdit::editingFinished, this, [this]() {
 			manager_set_network(&g_device, ip_edit->text().trimmed().toStdString(),
 					    port_spin->value());
@@ -2867,6 +3591,7 @@ private:
 	// finer values typed by hand.
 	static constexpr int PREDICTION_SLIDER_SCALE = 1; // step 1 ms
 	static constexpr int FOV_SLIDER_SCALE = 1;        // step 1 deg
+	static constexpr int BRIGHTNESS_SLIDER_SCALE = 1; // step 1 level
 	static constexpr int DISTANCE_SLIDER_SCALE = 10;  // step 0.1 m
 	static constexpr int SIZE_SLIDER_SCALE = 20;      // step 0.05 x
 	static constexpr int CURVE_SLIDER_SCALE = 20;     // step 0.05
@@ -2987,11 +3712,35 @@ private:
 			// checkbox appears together with the device.
 			device_form->setRowVisible(connect_box,
 						   transport != imu_transport::none);
-			const bool show_network =
-				traits_for(transport).uses_network_endpoint;
-			device_form->setRowVisible(ip_edit, show_network);
-			device_form->setRowVisible(port_spin, show_network);
+			const transport_traits tr = traits_for(transport);
+			device_form->setRowVisible(ip_edit,
+						   tr.uses_network_endpoint);
+			device_form->setRowVisible(port_spin,
+						   tr.uses_network_endpoint);
+			device_form->setRowVisible(brightness_row,
+						   tr.display_brightness);
+			device_form->setRowVisible(autobright_box,
+						   tr.display_brightness);
 		}
+		// Brightness is only adjustable while the session has the
+		// serial command port open (-1 = unknown/unavailable) and the
+		// device is not driving it from its ambient light sensor.
+		const int brightness =
+			g_device.brightness_current.load(std::memory_order_relaxed);
+		const int autobright =
+			g_device.autobright_current.load(std::memory_order_relaxed);
+		autobright_box->setEnabled(autobright >= 0);
+		if (g_device.autobright_request.load(std::memory_order_relaxed) <
+		    0) {
+			QSignalBlocker block(autobright_box);
+			autobright_box->setChecked(autobright == 1);
+		}
+		set_double_enabled(brightness_spin, brightness_slider,
+				   brightness >= 0 && autobright != 1);
+		if (brightness >= 0 && brightness <= 20 &&
+		    g_device.brightness_request.load(std::memory_order_relaxed) < 0)
+			set_double_control(brightness_spin, brightness_slider,
+					   BRIGHTNESS_SLIDER_SCALE, brightness);
 		stream_label->setText(!enabled ? obs_module_text("dock.stream.disabled")
 					       : (connected
 							  ? obs_module_text("dock.stream.connected")
@@ -3127,6 +3876,10 @@ private:
 	QFormLayout *device_form = nullptr;
 	QLineEdit *ip_edit = nullptr;
 	QSpinBox *port_spin = nullptr;
+	QDoubleSpinBox *brightness_spin = nullptr;
+	QSlider *brightness_slider = nullptr;
+	QWidget *brightness_row = nullptr;
+	QCheckBox *autobright_box = nullptr;
 	int last_transport = -1; // imu_transport value last applied to row visibility
 	QDoubleSpinBox *prediction_spin = nullptr;
 	QSlider *prediction_slider = nullptr;
@@ -3801,6 +4554,11 @@ static bool parse_transport(const char *s, imu_transport &out)
 		out = imu_transport::rayneo_hid;
 		return true;
 	}
+	if (_stricmp(s, "sensor_api") == 0 ||
+	    _stricmp(s, "windows_sensor_api") == 0) {
+		out = imu_transport::sensor_api;
+		return true;
+	}
 	return false;
 }
 
@@ -3914,7 +4672,9 @@ static void append_user_devices(std::vector<device_entry> &out,
 			display_ids.push_back(std::move(did));
 
 		const char *transport_name = "one_bridge_tcp";
-		if (e.profile.transport == imu_transport::air_hid)
+		if (e.profile.transport == imu_transport::sensor_api)
+			transport_name = "sensor_api";
+		else if (e.profile.transport == imu_transport::air_hid)
 			transport_name = "air_hid";
 		else if (e.profile.transport == imu_transport::rayneo_hid)
 			transport_name = "rayneo_hid";
@@ -3957,6 +4717,13 @@ static void append_builtin_glasses_display_ids(
 	rayneo_name.edid_vendor = nyan_real_pnp_vendor_word("TCL");
 	rayneo_name.name_contains = "SmartGlasses";
 	out.push_back(rayneo_name);
+
+	// EPSON MOVERIO BT-40 panel ("EPSON HMD"). SEC is Seiko Epson's PNP id
+	// and is shared with their projectors, so qualify by product code.
+	nyan_real_glasses_display_id moverio;
+	moverio.edid_vendor = nyan_real_pnp_vendor_word("SEC");
+	moverio.edid_product = 0xD004;
+	out.push_back(moverio);
 }
 
 // Build the device registry once, before the worker thread and the dock start

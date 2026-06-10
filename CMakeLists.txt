@@ -35,7 +35,11 @@ target_link_libraries(obs-nyan-real-3dof PRIVATE
   Iphlpapi
   User32
   SetupAPI
-  Hid)
+  Hid
+  Sensorsapi
+  PortableDeviceGuids
+  Ole32
+  Advapi32)
 
 if(Qt6_FOUND)
   target_link_libraries(obs-nyan-real-3dof PRIVATE Qt6::Widgets)
@@ -50,7 +54,13 @@ set_target_properties(obs-nyan-real-3dof PROPERTIES PREFIX "" OUTPUT_NAME "obs-n
 if(NOT DEFINED PLUGIN_VERSION OR PLUGIN_VERSION STREQUAL "")
   set(PLUGIN_VERSION "${PROJECT_VERSION}-dev")
 endif()
-target_compile_definitions(obs-nyan-real-3dof PRIVATE NYAN_REAL_3DOF_VERSION="${PLUGIN_VERSION}")
+# Configure-time stamp with an explicit timezone: __DATE__/__TIME__ would use
+# the build machine's local time (UTC on CI, JST locally), which reads as a
+# 9-hour offset depending on where the binary was built.
+string(TIMESTAMP PLUGIN_BUILD_TIME "%Y-%m-%d %H:%M UTC" UTC)
+target_compile_definitions(obs-nyan-real-3dof PRIVATE
+  NYAN_REAL_3DOF_VERSION="${PLUGIN_VERSION}"
+  NYAN_REAL_3DOF_BUILD_TIME="${PLUGIN_BUILD_TIME}")
 message(STATUS "obs-nyan-real-3dof version: ${PLUGIN_VERSION}")
 
 if(MSVC)

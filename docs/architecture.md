@@ -122,7 +122,7 @@ OBS Studio のソースはこのリポジトリにはベンダリングしてい
   バイアス自動適応までロックアウトするため、悪い窓を確定させないことが重要です。
   やり直し中はドックの姿勢が「較正中」のまま維持されます。
 - 装着オフセット（X 軸回りの自由角度）。既知値: XREAL One Standard +180 度、
-  XREAL One Pro -150 度、XREAL Air 0 度、RayNeo Air -20 度
+  XREAL One Pro -150 度、XREAL Air 0 度、RayNeo Air -20 度、MOVERIO BT-40 0 度
 - ジャイロ積分
 - 加速度計による重力補正
 - 静止時のジャイロバイアス自動適応
@@ -186,6 +186,25 @@ IMU 受信 transport は機種プロファイルで分岐します。
   `[0x99, kind, len, ...]` フレームを再組み立てして float32 の IMU/MAG を受け取る。
   `xrealonenet/3dof/js/rayneo_driver.js` のミラー。XREAL Air と異なり参照ドライバーは
   軸の入れ替えをしないため、デコーダーも軸変換なしでトラッカーへ渡す
+- EPSON MOVERIO BT-40 (`sensor_api`): IMU が標準の HID センサーコレクションとして
+  列挙されるため、Windows Sensor API（`ISensorManager`）でジャイロ（deg/s）・
+  加速度（G）・地磁気（mG）をポーリング取得する。検出した USB 識別子をデバイスパスに
+  含むセンサーだけを選ぶため、他デバイスのセンサーを掴むことはない。レポート間隔は
+  最小値を要求し、レポートのタイムスタンプ変化でサンプルの鮮度を判定する。
+  MOVERIO の公式ガイドによると加速度センサーだけ軸が反転している
+  （ジャイロ/地磁気: X=右・Y=上・Z=装着者方向、加速度: X=左・Y=下・Z=視線方向）
+  ため、加速度を全軸符号反転して共通フレームに揃える。
+  3 秒間サンプルが来なければ切断して自動再接続する。
+  デバイスの COM ポート（USB シリアル、MI_01）は SDK の Windows 用コマンド
+  リファレンスにあるディスプレイ制御コマンド専用で、IMU には使わない。セッションが
+  このポートも開き、`getbright` で現在輝度を取得、Dock の「画面の明るさ」
+  （0〜20、transport traits の `display_brightness` で MOVERIO 接続時のみ表示）からの
+  変更要求を `setbright` で適用して `getbright` で検証する（応答のフレーミングが
+  未文書化のため、応答文字列は信用せず再取得で確認する方式）。「自動調光」
+  チェックボックスは `enableautobright 0/1` / `getautobright` に対応し、環境光
+  センサーによる自動輝度調整を切り替える（ON の間、手動スライダーは無効。自動調光中の
+  `getbright` は 50 を返すためスライダーへの同期も自然に止まる）。ポートが開けない場合、
+  IMU はそのまま動き、明るさ・自動調光の行はグレーアウトする
 
 判別はワーカースレッドが約 1 秒ごとに実行し、結果を `detected_model`（レジストリの
 1 始まりインデックス、0 = unknown）に保持します。接続中に HID が unknown へ戻った場合、
@@ -204,6 +223,7 @@ IMU 受信 transport は機種プロファイルで分岐します。
 | XREAL Air 系（汎用） | 3318:* + ProductString に `Air` | Air (0°) | 46° |
 | RayNeo Air | 1BBB:AF50 | RayNeo (-20°) | 46° |
 | RayNeo Air 系（汎用） | 1BBB:* + ProductString に `RayNeo` | RayNeo (-20°) | 46° |
+| EPSON MOVERIO BT-40 | 04B8:0D12 | MOVERIO (0°) | 34° |
 
 - `FOV をデバイスから自動` が ON のときは、判別した機種の FOV を使います。OFF の
   とき、または機種が未判別のときは、`Display FOV` スライダーの値を使います。
