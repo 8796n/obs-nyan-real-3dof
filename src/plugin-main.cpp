@@ -154,9 +154,11 @@ constexpr float MOUNT_X_DEG_ONE_PRO = -150.0f;
 constexpr float MOUNT_X_DEG_AIR = 0.0f;
 constexpr float MOUNT_X_DEG_RAYNEO = -20.0f;
 constexpr float MOUNT_X_DEG_MOVERIO = 0.0f;
-// ar-drivers-rs models the Rokid Max display as tilted 0.07 rad (~4 deg)
-// against the IMU; the sign for our convention is confirmed on hardware.
-constexpr float MOUNT_X_DEG_ROKID = -4.0f;
+// ar-drivers-rs models the Rokid displays as tilted against the IMU:
+// 0.07 rad (~4 deg) on the Max, 0.022 rad (~1.3 deg) on the Air. The sign for
+// our convention was confirmed on Max hardware.
+constexpr float MOUNT_X_DEG_ROKID_MAX = -4.0f;
+constexpr float MOUNT_X_DEG_ROKID_AIR = -1.3f;
 
 enum class imu_transport : int {
 	none = 0,
@@ -277,13 +279,19 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 				    MOUNT_X_DEG_MOVERIO, 34.0f, 1920, 1080,
 				    "EPSON MOVERIO BT-40"};
 	// Rokid Max / Air stream fixed 64-byte packets on a vendor HID
-	// interface without any start command. The published Max FOV of
-	// 50 deg diagonal applies to the native 1920x1200 panel; at the usual
-	// 1920x1080 mode the letterboxed image spans atan(diag1080/diag1200 *
-	// tan(25 deg)) * 2 = 48.8 deg.
-	const model_profile rokid = {imu_transport::rokid_hid,
-				     MOUNT_X_DEG_ROKID, 48.8f, 1920, 1080,
-				     "Rokid Max / Air"};
+	// interface without any start command. Both share PID 0x162F and are
+	// told apart by the product string containing "Max" (mirrors the
+	// reference driver). The published Max FOV of 50 deg diagonal applies
+	// to the native 1920x1200 panel; at the usual 1920x1080 mode the
+	// letterboxed image spans atan(diag1080/diag1200 * tan(25 deg)) * 2 =
+	// 48.8 deg. The Air has a native 1080p panel, so its published 43 deg
+	// applies directly.
+	const model_profile rokid_max = {imu_transport::rokid_hid,
+					 MOUNT_X_DEG_ROKID_MAX, 48.8f, 1920,
+					 1080, "Rokid Max"};
+	const model_profile rokid_air = {imu_transport::rokid_hid,
+					 MOUNT_X_DEG_ROKID_AIR, 43.0f, 1920,
+					 1080, "Rokid Air"};
 
 	out.push_back({XREAL_VID, 0x0435, L"", one_pro});
 	out.push_back({XREAL_VID, 0x0436, L"", one_pro});
@@ -300,8 +308,9 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 	out.push_back({RAYNEO_VID, 0xAF50, L"", rayneo});
 	out.push_back({RAYNEO_VID, 0x0000, L"RayNeo", rayneo});
 	out.push_back({EPSON_VID, 0x0D12, L"", bt40});
-	out.push_back({ROKID_VID, 0x162F, L"", rokid});
-	out.push_back({ROKID_VID, 0x0000, L"Rokid", rokid});
+	out.push_back({ROKID_VID, 0x162F, L"Max", rokid_max});
+	out.push_back({ROKID_VID, 0x162F, L"", rokid_air});
+	out.push_back({ROKID_VID, 0x0000, L"Rokid", rokid_max});
 }
 
 struct hid_interface_info {
