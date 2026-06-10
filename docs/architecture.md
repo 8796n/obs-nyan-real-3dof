@@ -123,7 +123,7 @@ OBS Studio のソースはこのリポジトリにはベンダリングしてい
   やり直し中はドックの姿勢が「較正中」のまま維持されます。
 - 装着オフセット（X 軸回りの自由角度）。既知値: XREAL One Standard +180 度、
   XREAL One Pro -150 度、XREAL Air 0 度、RayNeo Air -20 度、MOVERIO BT-40 0 度、
-  Rokid Max -4 度（参照実装のチルト 0.07 rad より）
+  Rokid Max -4 度 / Rokid Air -1.3 度（参照実装のチルト 0.07 / 0.022 rad より）
 - ジャイロ積分
 - 加速度計による重力補正
 - 静止時のジャイロバイアス自動適応
@@ -235,8 +235,9 @@ IMU 受信 transport は機種プロファイルで分岐します。
 | RayNeo Air | 1BBB:AF50 | RayNeo (-20°) | 46° |
 | RayNeo Air 系（汎用） | 1BBB:* + ProductString に `RayNeo` | RayNeo (-20°) | 46° |
 | EPSON MOVERIO BT-40 | 04B8:0D12 | MOVERIO (0°) | 34° |
-| Rokid Max / Air | 04D2:162F | Rokid (-4°) | 48.8°（1080p 時。1200p ネイティブで 50°） |
-| Rokid 系（汎用） | 04D2:* + ProductString に `Rokid` | Rokid (-4°) | 48.8° |
+| Rokid Max | 04D2:162F + ProductString に `Max` | Rokid Max (-4°) | 48.8°（1080p 時。1200p ネイティブで 50°） |
+| Rokid Air | 04D2:162F（上記以外） | Rokid Air (-1.3°) | 43°（ネイティブ 1080p） |
+| Rokid 系（汎用） | 04D2:* + ProductString に `Rokid` | Rokid Max (-4°) | 48.8° |
 
 - `FOV をデバイスから自動` が ON のときは、判別した機種の FOV を使います。OFF の
   とき、または機種が未判別のときは、`Display FOV` スライダーの値を使います。
