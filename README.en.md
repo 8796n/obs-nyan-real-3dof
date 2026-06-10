@@ -8,6 +8,14 @@ Small OBS Studio plugin that reads IMU data from HID-detected AR glasses
 Module/DLL: `obs-nyan-real-3dof`  
 Sources: `nyan Real 3DoF Virtual Screen` / `nyan Real Display Wall`
 
+## Install
+
+Download the installer (`*-installer.exe`) or the portable ZIP from
+[Releases](https://github.com/8796n/obs-nyan-real-3dof/releases). Close OBS
+before running the installer. For the ZIP, extract the `obs-nyan-real-3dof`
+folder into `%ProgramData%\obs-studio\plugins\`. To build from source, see
+"Build" below.
+
 ## What It Does
 
 ```text
