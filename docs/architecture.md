@@ -22,6 +22,7 @@ src/
   device_manager.h/.cpp  グローバル状態・ワーカースレッド・ドック向けセッター
   transports/            機種ファミリーごとの IMU セッション（transports.h に一覧）
     xreal_tcp.cpp / xreal_air.cpp(.h) / rayneo.cpp / moverio.cpp / rokid.cpp / viture.cpp
+  cursor_fence.cpp(.h)   メガネ画面へのカーソル進入防止（WH_MOUSE_LL フック）
   dock.cpp(.h)           Qt ドック UI とプロジェクター制御
   virtual_source.cpp(.h) 仮想スクリーン入力ソースとワープシェーダー結線
   display-wall-source.cpp(.h)  Display Wall 入力ソース
@@ -102,6 +103,15 @@ OBS Studio のソースはこのリポジトリにはベンダリングしてい
   ディスプレイが切断された場合はそこにあったプロジェクターを自動で閉じます(Windows が
   ウィンドウを他のモニターへ移動させ、デスクトップを覆うのを防ぐため)。監視はメガネ画面の
   実解像度もキャッシュし、仮想スクリーンのレンダー解像度の自動追従に使われます。
+  「メガネ画面にカーソルを入れない」(既定 OFF)は WH_MOUSE_LL フックによる
+  カーソルフェンスです。カーソルがメガネ画面に入ろうとしたとき、貫通した先に
+  通常ディスプレイがあればそこへワープ(トンネル。メガネ画面が通常画面の間に
+  挟まる配置でもカーソルの連結性が保たれる)、無ければ壁としてブロックします。
+  ワープは SendInput の dwExtraInfo 署名でフック再入を素通しします。フェンスは
+  メガネ画面の EDID 検出中だけ立ち、有効化時にカーソルがメガネ画面内にいた場合は
+  通常ディスプレイへ押し出します。押し出し先が無い構成(通常ディスプレイなし)では
+  カーソル詰み防止のためフェンスを立てません。フックはドックのポーリングが
+  管理するため、Qt なしビルドでは機能しません。
 - Device Manager: Dock の設定を保存/復元し、HID/TCP/トラッカー/姿勢スナップショットを
   モジュール単位で保持します。
 - Virtual Screen Source: `OBS_SOURCE_TYPE_INPUT` / `OBS_SOURCE_CUSTOM_DRAW` /

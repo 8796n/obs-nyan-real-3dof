@@ -27,6 +27,8 @@ struct device_manager {
 	std::atomic<bool> debug_log{false};
 	std::atomic<bool> mag_yaw{false};
 	std::atomic<bool> auto_projector{false};
+	// Keep the mouse cursor off the glasses display (dock-driven LL hook).
+	std::atomic<bool> cursor_fence{false};
 	std::atomic<int> detected_model{MODEL_UNKNOWN}; // model_id, set by worker
 	// Mount override in centidegrees, reported by the device itself (RayNeo
 	// derives it from the device-info board id). INT32_MIN = no override,

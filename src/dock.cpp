@@ -39,6 +39,7 @@
 #include <cstring>
 #include <string>
 
+#include "cursor_fence.h"
 #include "device_manager.h"
 #include "device_registry.h"
 #include "display-wall-source.h"
@@ -294,8 +295,13 @@ public:
 			obs_module_text("dock.auto_projector"), device_group);
 		auto_projector_box->setToolTip(
 			obs_module_text("dock.auto_projector_tooltip"));
+		cursor_fence_box = new QCheckBox(
+			obs_module_text("dock.cursor_fence"), device_group);
+		cursor_fence_box->setToolTip(
+			obs_module_text("dock.cursor_fence_tooltip"));
 		device_form->addRow(QString(), projector_button);
 		device_form->addRow(QString(), auto_projector_box);
+		device_form->addRow(QString(), cursor_fence_box);
 		root->addWidget(device_group);
 
 		auto *screen_group = new QGroupBox(obs_module_text("dock.screen"), content);
@@ -399,6 +405,15 @@ public:
 					 g_device.auto_projector.store(
 						 checked,
 						 std::memory_order_relaxed);
+				 });
+		// The fence itself rises/falls on the next poll tick, which
+		// also knows the current glasses-display rect.
+		QObject::connect(cursor_fence_box, &QCheckBox::toggled, this,
+				 [this](bool checked) {
+					 g_device.cursor_fence.store(
+						 checked,
+						 std::memory_order_relaxed);
+					 refresh();
 				 });
 		QObject::connect(reset_defaults, &QPushButton::clicked, this, [this]() {
 			manager_reset_defaults(&g_device);
@@ -656,6 +671,11 @@ private:
 						       ? glasses.height
 						       : 0,
 					       std::memory_order_relaxed);
+		cursor_fence_update(
+			g_device.cursor_fence.load(std::memory_order_relaxed),
+			glasses_rect_valid, glasses.x, glasses.y,
+			glasses.x + static_cast<long>(glasses.width),
+			glasses.y + static_cast<long>(glasses.height));
 		glasses_display_label->setText(
 			glasses_display_present
 				? QString::fromStdString(
@@ -672,6 +692,11 @@ private:
 		{
 			QSignalBlocker block(auto_projector_box);
 			auto_projector_box->setChecked(g_device.auto_projector.load(
+				std::memory_order_relaxed));
+		}
+		{
+			QSignalBlocker block(cursor_fence_box);
+			cursor_fence_box->setChecked(g_device.cursor_fence.load(
 				std::memory_order_relaxed));
 		}
 		if (!glasses_display_present) {
@@ -781,6 +806,7 @@ private:
 	QCheckBox *debug_box = nullptr;
 	QPushButton *projector_button = nullptr;
 	QCheckBox *auto_projector_box = nullptr;
+	QCheckBox *cursor_fence_box = nullptr;
 	// Auto-open latch: one projector per glasses-display connection.
 	bool auto_projector_opened = false;
 	// Projectors seen on the glasses screen; closed on display removal.
@@ -812,6 +838,7 @@ void init_dock()
 
 void shutdown_dock()
 {
+	cursor_fence_shutdown();
 	obs_frontend_remove_dock("nyan_real_3dof_dock");
 }
 #else

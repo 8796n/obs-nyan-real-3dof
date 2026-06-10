@@ -303,6 +303,8 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 			 std::memory_order_relaxed);
 	f->auto_projector.store(get_bool_setting(settings, "auto_projector", false),
 				std::memory_order_relaxed);
+	f->cursor_fence.store(get_bool_setting(settings, "cursor_fence", false),
+			      std::memory_order_relaxed);
 	f->debug_log.store(get_bool_setting(settings, "debug_log", false),
 			   std::memory_order_relaxed);
 	const model_id m = detected_hid_model(f);
@@ -406,6 +408,7 @@ void manager_reset_defaults(device_manager *f)
 	f->screen_curve.store(DEFAULT_SCREEN_CURVE, std::memory_order_relaxed);
 	f->mag_yaw.store(false, std::memory_order_relaxed);
 	f->auto_projector.store(false, std::memory_order_relaxed);
+	f->cursor_fence.store(false, std::memory_order_relaxed);
 	f->debug_log.store(false, std::memory_order_relaxed);
 
 	const model_id m = detected_hid_model(f);
@@ -450,6 +453,8 @@ void manager_save_load(obs_data_t *save_data, bool saving, void *)
 				  g_device.mag_yaw.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "auto_projector",
 				  g_device.auto_projector.load(std::memory_order_relaxed));
+		obs_data_set_bool(obj, "cursor_fence",
+				  g_device.cursor_fence.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "debug_log",
 				  g_device.debug_log.load(std::memory_order_relaxed));
 		obs_data_set_obj(save_data, key, obj);
