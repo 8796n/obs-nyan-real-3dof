@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// nyan Real 3DoF source warp. Backward samples the source as a virtual screen.
+
+uniform float4x4 ViewProj;
+uniform texture2d image;
+
+// Stored as (w, x, y, z).
+uniform float4 pose_q;
+uniform float pose_valid;
+uniform float2 tan_half_fov;
+uniform float screen_distance_m;
+uniform float2 screen_half_size_m;
+uniform float screen_curve;
+uniform float debug_tint;
+
+sampler_state linClamp {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData o;
+	o.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	o.uv = v_in.uv;
+	return o;
+}
+
+float3 rotate_by_quat(float3 v, float4 q)
+{
+	float3 qv = float3(q.y, q.z, q.w);
+	float3 t = 2.0 * cross(qv, v);
+	return v + (q.x * t) + cross(qv, t);
+}
+
+float4 PSWarp(VertData v_in) : TARGET
+{
+	if (pose_valid < 0.5) {
+		float4 col0 = image.Sample(linClamp, v_in.uv);
+		if (debug_tint > 0.01)
+			col0.rgb = lerp(col0.rgb, float3(0.6, 0.2, 0.0), 0.18);
+		return col0;
+	}
+
+	float2 ndc = float2((v_in.uv.x * 2.0 - 1.0) * tan_half_fov.x,
+			    (1.0 - v_in.uv.y * 2.0) * tan_half_fov.y);
+	float3 dir = normalize(float3(ndc.x, ndc.y, -1.0));
+	float3 d = rotate_by_quat(dir, normalize(pose_q));
+
+	if (screen_distance_m <= 1e-4 || screen_half_size_m.x <= 1e-6 ||
+	    screen_half_size_m.y <= 1e-6)
+		return float4(0.0, 0.0, 0.0, 1.0);
+
+	float curve = clamp(screen_curve, 0.0, 3.0);
+	float2 suv;
+	if (curve <= 0.0001) {
+		if (d.z >= -1e-4)
+			return float4(0.0, 0.0, 0.0, 1.0);
+
+		float t = -screen_distance_m / d.z;
+		float2 hit = d.xy * t;
+		suv = float2(0.5 + hit.x / (2.0 * screen_half_size_m.x),
+			     0.5 - hit.y / (2.0 * screen_half_size_m.y));
+	} else {
+		float radius = screen_distance_m / curve;
+		float center_z = radius - screen_distance_m;
+		float a = d.x * d.x + d.z * d.z;
+		float b = -2.0 * center_z * d.z;
+		float c = center_z * center_z - radius * radius;
+		float disc = b * b - 4.0 * a * c;
+		if (a <= 1e-6 || disc < 0.0)
+			return float4(0.0, 0.0, 0.0, 1.0);
+
+		float root = sqrt(disc);
+		float t = (-b + root) / (2.0 * a);
+		if (t <= 1e-4)
+			t = (-b - root) / (2.0 * a);
+		if (t <= 1e-4)
+			return float4(0.0, 0.0, 0.0, 1.0);
+
+		float3 hit = d * t;
+		float theta = atan2(hit.x, center_z - hit.z);
+		float arc_x = radius * theta;
+		suv = float2(0.5 + arc_x / (2.0 * screen_half_size_m.x),
+			     0.5 - hit.y / (2.0 * screen_half_size_m.y));
+	}
+
+	if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0)
+		return float4(0.0, 0.0, 0.0, 1.0);
+
+	float4 col = image.Sample(linClamp, suv);
+	if (debug_tint > 0.01)
+		col.rgb = lerp(col.rgb, float3(0.0, 0.75, 0.45), saturate(debug_tint));
+	return col;
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSWarp(v_in);
+	}
+}

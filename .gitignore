@@ -1,0 +1,15 @@
+build/
+dist/
+.vs/
+.vscode/
+deps/gen/
+deps/obs-studio/
+deps/obslib/
+deps/qt/
+CMakeUserPresets.json
+*.user
+*.log
+.build.log
+__pycache__/
+*.pyc
+

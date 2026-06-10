@@ -1,0 +1,87 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: ver
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          $tag = $env:REF_NAME
+          if ($tag -match '^v\d+\.\d+\.\d+.*$') { $v = $tag -replace '^v', '' }
+          else { $v = "0.1.$env:RUN_NUMBER" }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "version = $v"
+
+      - name: Setup MSVC
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          $before = @{}
+          foreach ($e in Get-ChildItem Env:) { $before[$e.Name] = $e.Value }
+          cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              $n = $Matches[1]; $v = $Matches[2]
+              if ($before[$n] -ne $v) { "$n=$v" | Out-File $env:GITHUB_ENV -Append -Encoding utf8 }
+            }
+          }
+
+      - name: Install Ninja + OBS Studio + Inno Setup
+        run: |
+          choco install ninja --no-progress -y
+          choco install obs-studio --no-progress -y --version=32.1.2
+          choco install innosetup --no-progress -y
+
+      - name: Setup dependencies
+        run: ./setup.ps1
+
+      - name: Configure + build
+        env:
+          PLUGIN_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY `
+            "-DPLUGIN_VERSION=$env:PLUGIN_VERSION"
+          cmake --build build
+
+      - name: Package
+        env:
+          PLUGIN_VERSION: ${{ steps.ver.outputs.version }}
+        run: ./package.ps1 -Version $env:PLUGIN_VERSION
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: obs-nyan-real-3dof-${{ steps.ver.outputs.version }}
+          path: dist/*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          name: obs-nyan-real-3dof ${{ steps.ver.outputs.version }}
+          files: |
+            dist/*.zip
+            dist/*installer.exe
+          generate_release_notes: true

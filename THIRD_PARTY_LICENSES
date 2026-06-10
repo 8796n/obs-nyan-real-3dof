@@ -1,0 +1,14 @@
+THIRD-PARTY LICENSES
+====================
+
+obs-nyan-real-3dof is licensed under GPL-2.0-or-later (see LICENSE).
+
+The plugin links against libobs, which is part of OBS Studio and licensed under
+GPL-2.0-or-later. OBS headers and the generated import library are build-time
+dependencies only and are not distributed in this repository.
+
+Build-time only:
+- OBS Studio / libobs headers + import library
+  https://github.com/obsproject/obs-studio
+  License: GPL-2.0-or-later
+
