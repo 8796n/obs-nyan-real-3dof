@@ -21,7 +21,18 @@ find_package(Qt6 COMPONENTS Widgets QUIET)
 add_library(obs-nyan-real-3dof MODULE)
 target_sources(obs-nyan-real-3dof PRIVATE
   src/plugin-main.cpp
-  src/display-wall-source.cpp)
+  src/device_manager.cpp
+  src/device_registry.cpp
+  src/hid_io.cpp
+  src/dock.cpp
+  src/virtual_source.cpp
+  src/display-wall-source.cpp
+  src/transports/xreal_tcp.cpp
+  src/transports/xreal_air.cpp
+  src/transports/rayneo.cpp
+  src/transports/moverio.cpp
+  src/transports/rokid.cpp
+  src/transports/viture.cpp)
 
 target_include_directories(obs-nyan-real-3dof PRIVATE
   "${OBS_SRC}/libobs"

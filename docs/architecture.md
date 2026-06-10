@@ -6,6 +6,31 @@
 
 > このドキュメントは開発者向けの内部資料です（日本語が原則）。配布物には同梱しません。
 
+## ソース構成
+
+責務ごとに分割した複数の翻訳単位で構成します。共有型とレジストリ・トラッカーは
+ヘッダー、デバイス I/O とUIは .cpp です。
+
+```
+src/
+  plugin-main.cpp        モジュールエントリ（ロード/アンロードと各部の登録のみ）
+  nyan_types.h           共有型（imu_transport / model_profile / 各サンプル / pose_snapshot）と定数
+  math_util.h            クォータニオン・ベクトル数学とバイトリーダー（ヘッダーオンリー）
+  head_tracker.h         姿勢トラッカー（on_imu / on_external_pose、ヘッダーオンリー）
+  device_registry.h/.cpp 組み込みデバイステーブル + devices.json + EDID 識別子
+  hid_io.h/.cpp          HID 列挙・機種判別と OVERLAPPED レポート I/O
+  device_manager.h/.cpp  グローバル状態・ワーカースレッド・ドック向けセッター
+  transports/            機種ファミリーごとの IMU セッション（transports.h に一覧）
+    xreal_tcp.cpp / xreal_air.cpp(.h) / rayneo.cpp / moverio.cpp / rokid.cpp / viture.cpp
+  dock.cpp(.h)           Qt ドック UI とプロジェクター制御
+  virtual_source.cpp(.h) 仮想スクリーン入力ソースとワープシェーダー結線
+  display-wall-source.cpp(.h)  Display Wall 入力ソース
+```
+
+新しい機種ファミリーの追加は「`transports/` に 1 ファイル + `transports.h` に宣言 +
+`device_registry.cpp` の組み込みテーブルに行を追加 + locale キー」が基本形です。
+既存プロトコルの新 PID だけなら devices.json（後述）で足ります。
+
 ## ビルド依存
 
 OBS Studio のソースはこのリポジトリにはベンダリングしていません。`setup.ps1` が
