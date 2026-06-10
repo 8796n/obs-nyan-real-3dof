@@ -34,3 +34,15 @@
 - `docs/` 配下は開発者向けの内部資料のため、配布パッケージ（`package.ps1`）には
   同梱しません。例外は README が参照するスクリーンショット（`docs/images/`）で、
   これだけは配布物にも含めます。
+
+## 開発フロー
+
+`main` への変更は、次の流れを原則とします（`main` への直接 push はしません）。
+
+1. 変更内容を説明する issue を立てる
+2. トピックブランチで PR を作成し、issue を参照する
+3. レビューを経て `main` へマージする（squash マージ）
+
+リリースは `main` 上のコミットへ `v*` タグを push すると、GitHub Actions
+（`.github/workflows/release.yml`）がビルドして ZIP とインストーラーを
+Releases へ公開します。
