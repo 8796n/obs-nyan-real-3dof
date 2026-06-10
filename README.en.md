@@ -69,8 +69,8 @@ your head.
 This walks through the flagship setup, starting from the goal.
 
 **Goal:** pin several displays (physical or virtual ones created with tools like
-Parsec VDD) to one large fixed virtual screen in your AR glasses, and look at
-each display by turning your head.
+[ParsecVDisplay](https://github.com/nomi-san/parsec-vdd)) to one large fixed
+virtual screen in your AR glasses, and look at each display by turning your head.
 
 **End state:** two scenes. A `Wall` scene (it holds the Display Wall source,
 which combines the display captures into one picture) and a `Glasses` scene
@@ -82,7 +82,9 @@ source projector, and everything is tuned in the dock.
 
 - the plugin is installed and OBS has been restarted
 - the glasses are connected by USB (HID; the dock in step 1 confirms this)
-- the displays you want to combine are active in Windows
+- the displays you want to combine are active in Windows (if you need more,
+  add virtual displays with a driver such as
+  [ParsecVDisplay](https://github.com/nomi-san/parsec-vdd))
 
 ### Step 1: show the dock
 
@@ -197,7 +199,8 @@ so the edges stay readable.
 
 The `nyan Real Display Wall` source combines multiple Windows display captures
 into one OBS source. It is meant for virtual displays created by tools such as
-Parsec VDD: arrange them by mirroring the Windows system display arrangement
+[ParsecVDisplay](https://github.com/nomi-san/parsec-vdd) (Parsec VDD): arrange
+them by mirroring the Windows system display arrangement
 (the default), in auto columns, or with a row layout such as `1,2,3 / 4,5`. The
 combined wall size becomes the source size. `Horizontal gap`, `Vertical gap`,
 and `Padding` add space between displays. Windows arrangement mode keeps OS
