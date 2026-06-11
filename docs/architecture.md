@@ -323,6 +323,23 @@ IMU 受信 transport は機種プロファイルで分岐します。
   常時送信する。応答は category が type+1 で返る（ar-drivers-rs の実装と実機検証
   済みの解析メモに基づく）
 
+- VITURE: IMU と同じ 2 つのベンダー HID（FF FE コマンド / FF FD 応答、CRC-16-CCITT）。
+  GET = cmd 0x07（データなし）、SET = cmd 0x08 でデータ 1 バイト '1'(0x31)=2D 1920x1080 /
+  '2'(0x32)=3D SBS 3840x1080。応答ペイロード先頭バイトがその ASCII 状態を返す
+  （公式 Linux SDK 1.0.7 の set_3d / get_3d_state を逆アセンブルして確認。プロトコル
+  事実のみ利用、SDK コードは不使用）。VITURE にはリフレッシュレート切替コマンドは無く、
+  この解像度トグルのみ。`display_modes` の値は ASCII 状態バイトそのもので、セッションは
+  接続時と SET 後に GET して `display_mode_current` を更新する。3D に切替えると画面が
+  3840x1080 になり SBS 出力「自動」が追従する
+
+Rokid にも切替コマンド自体は存在する（ar-drivers-rs: EP0 ベンダー要求 GET 0x81 /
+SET 0x01、wIndex 1、モード 0=2D / 1=SBS / 3=2D 高リフレッシュ / 4=SBS 高リフレッシュ）
+が、Windows では全インターフェースが標準クラスドライバ（usbaudio / HidUsb）に
+バインドされており WinUSB のベンダー IF が無いため、ドライバ差し替えなしには
+送れない（Rokid Air 実機で構成確認、2026-06-11）。よって `rokid_hid` の
+display_modes は空のまま。本体ボタンでの 2D/3D 切替は EDID 再列挙で SBS 出力の
+「自動」が追従する。
+
 SBS 出力（描画側）はデバイス非依存で、`sbs_output`（0=自動 / 1=オン / 2=オフ、
 ドックの「SBS出力」コンボ、保存対象）に従い仮想スクリーンの video_render が
 ワープ済みビューを左右半分に 1 回ずつ描く（per-eye 幅で FOV を計算）。「自動」は

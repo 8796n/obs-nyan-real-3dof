@@ -17,11 +17,21 @@
 #include "transports.h"
 
 constexpr uint16_t VITURE_VID = 0x35CA;
-// VITURE 64-byte packets: FF FC = IMU data, FF FE = MCU command; command
-// 0x15 with payload 1/0 starts/stops the fused-euler stream.
+// VITURE 64-byte packets: FF FC = IMU data, FF FD = MCU response, FF FE = MCU
+// command; command 0x15 with payload 1/0 starts/stops the fused-euler stream.
 constexpr uint8_t VITURE_HDR_IMU = 0xFC;
+constexpr uint8_t VITURE_HDR_RSP = 0xFD;
 constexpr uint8_t VITURE_HDR_CMD = 0xFE;
 constexpr uint16_t VITURE_CMD_IMU = 0x15;
+// Resolution / SBS control, from disassembling the official Linux SDK 1.0.7
+// (set_3d / get_3d_state -> native_mcu_exec/native_mcu_rsp): GET = cmd 0x07
+// (no data), SET = cmd 0x08 with one ASCII byte '1' (2D 1920x1080) or '2'
+// (3D SBS 3840x1080). The response payload's first byte echoes that ASCII
+// state. Only the protocol facts are taken; no SDK code is used.
+constexpr uint16_t VITURE_CMD_GET_3D = 0x07;
+constexpr uint16_t VITURE_CMD_SET_3D = 0x08;
+constexpr uint8_t VITURE_3D_OFF = 0x31; // '1' 1920x1080
+constexpr uint8_t VITURE_3D_ON = 0x32;  // '2' 3840x1080 SBS
 
 // --- VITURE HID --------------------------------------------------------------
 // VITURE glasses expose two vendor HID interfaces (usage page 0xFF00): MI_00
@@ -89,6 +99,79 @@ static void viture_send_imu_enable(std::vector<viture_iface> &ifaces,
 			hid_write_report(it.h, it.info.output_report_len, pkt,
 					 250);
 	}
+}
+
+// Broadcast a command with one data byte to every interface, both CRC orders
+// (mirrors viture_send_imu_enable). Used for the SET-3D command.
+static void viture_send_command(std::vector<viture_iface> &ifaces,
+				uint16_t cmd_id, uint8_t data)
+{
+	for (int crc_be = 1; crc_be >= 0; --crc_be) {
+		const auto pkt = build_viture_command(cmd_id, &data, 1,
+						      crc_be != 0);
+		for (auto &it : ifaces)
+			hid_write_report(it.h, it.info.output_report_len, pkt,
+					 250);
+	}
+}
+
+// Strip the optional Windows report-id byte and, if this is an FF FD MCU
+// response, return its command id and the state byte. The response payload is
+// [status @0x12][state @0x13]; the official SDK skips the status byte and
+// reads the state, confirmed on VITURE One hardware (status 0x00 = OK, state
+// '1'/'2').
+static bool decode_viture_response(const uint8_t *data, size_t len,
+				   uint16_t &cmd_id, uint8_t &state)
+{
+	if (len >= 2 && data[0] == 0x00 && data[1] == 0xFF) {
+		data++;
+		len--;
+	}
+	if (len < 0x14 || data[0] != 0xFF || data[1] != VITURE_HDR_RSP)
+		return false;
+	cmd_id = read_u16_le(data + 0x0E);
+	state = data[0x13];
+	return true;
+}
+
+// Query the current resolution state: send GET-3D and read the FF FD response
+// from any interface. Returns the ASCII state byte ('1'/'2') or -1 on failure.
+static int viture_query_3d(std::vector<viture_iface> &ifaces)
+{
+	for (int crc_be = 1; crc_be >= 0; --crc_be) {
+		const auto pkt = build_viture_command(VITURE_CMD_GET_3D, nullptr,
+						      0, crc_be != 0);
+		for (auto &it : ifaces)
+			hid_write_report(it.h, it.info.output_report_len, pkt,
+					 250);
+	}
+	std::vector<uint8_t> report;
+	const uint64_t start = os_gettime_ns();
+	while (os_gettime_ns() - start < 500000000ULL) {
+		for (auto &it : ifaces) {
+			if (!hid_read_report(it.h, it.info.input_report_len,
+					     report, 50))
+				continue;
+			uint16_t cmd_id = 0;
+			uint8_t state = 0;
+			if (decode_viture_response(report.data(), report.size(),
+						   cmd_id, state) &&
+			    cmd_id == VITURE_CMD_GET_3D)
+				return state;
+		}
+	}
+	return -1;
+}
+
+// Refresh display_mode_current from a GET. A failed query (e.g. while the
+// display re-clocks after a mode switch) leaves the existing value untouched,
+// so an optimistic store after a SET is not clobbered.
+static void viture_refresh_3d(device_manager *f,
+			      std::vector<viture_iface> &ifaces)
+{
+	const int state = viture_query_3d(ifaces);
+	if (state >= 0)
+		f->display_mode_current.store(state, std::memory_order_relaxed);
 }
 
 // Strip the Windows report-id byte if present and decode a FF FC IMU packet
@@ -181,6 +264,12 @@ void run_viture_hid_session(device_manager *f, uint32_t &seen_epoch)
 		     static_cast<unsigned>(ifaces.size()),
 		     static_cast<unsigned>(imu_index));
 
+	// The MCU command channel rides the same interfaces as the IMU stream,
+	// so the resolution state is available without a separate handle.
+	// Default to unavailable, then let the GET set the real value.
+	f->display_mode_current.store(-1, std::memory_order_relaxed);
+	viture_refresh_3d(f, ifaces);
+
 	std::vector<uint8_t> report;
 	uint64_t last_rx_ns = os_gettime_ns();
 	uint64_t last_nudge_ns = last_rx_ns;
@@ -208,6 +297,27 @@ void run_viture_hid_session(device_manager *f, uint32_t &seen_epoch)
 			viture_send_imu_enable(ifaces, true);
 		}
 
+		// Resolution change requested from the dock (display_mode value
+		// is the ASCII state byte '1'/'2'). Switching re-clocks the
+		// display, so the brief query that follows is invisible.
+		const int mode_req =
+			f->display_mode_request.exchange(-1, std::memory_order_relaxed);
+		if (mode_req == VITURE_3D_OFF || mode_req == VITURE_3D_ON) {
+			viture_send_command(ifaces, VITURE_CMD_SET_3D,
+					    static_cast<uint8_t>(mode_req));
+			// Store the requested state right away: the switch
+			// re-clocks the display and the device can be briefly
+			// unresponsive to the verify GET that follows.
+			f->display_mode_current.store(mode_req,
+						      std::memory_order_relaxed);
+			if (f->debug_log.load(std::memory_order_relaxed))
+				blog(LOG_INFO,
+				     "[obs-nyan-real-3dof] VITURE 3D -> '%c'",
+				     mode_req);
+			viture_refresh_3d(f, ifaces);
+			last_rx_ns = os_gettime_ns(); // query consumed read time
+		}
+
 		if (!hid_read_report(ifaces[imu_index].h,
 				     ifaces[imu_index].info.input_report_len,
 				     report, 250))
@@ -223,6 +333,7 @@ void run_viture_hid_session(device_manager *f, uint32_t &seen_epoch)
 	viture_send_imu_enable(ifaces, false);
 	for (auto &it : ifaces)
 		CloseHandle(it.h);
+	f->display_mode_current.store(-1, std::memory_order_relaxed);
 	f->connected.store(false, std::memory_order_relaxed);
 	publish_pose(f, false);
 	if (f->debug_log.load(std::memory_order_relaxed))
