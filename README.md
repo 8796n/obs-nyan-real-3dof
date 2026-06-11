@@ -28,6 +28,7 @@ HID device detection (XREAL / RayNeo / EPSON MOVERIO / Rokid / VITURE / Nreal Li
   -> Nreal Light: OV580 コプロセッサーからの生 IMU ストリーム (HID)
   -> ジャイロ + 加速度による姿勢トラッキング
   -> 任意で MAG ヨー補正
+  -> 表示モード切替 (Air系 / Nreal Light: 2D/3D SBS・リフレッシュレート) + SBS出力描画
   -> OBS 内での仮想スクリーンソース描画
 ```
 

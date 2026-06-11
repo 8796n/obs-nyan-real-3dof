@@ -43,6 +43,16 @@ struct device_manager {
 	std::atomic<int> brightness_request{-1};
 	std::atomic<int> autobright_current{-1};
 	std::atomic<int> autobright_request{-1};
+	// Display mode over the device command channel (air_hid MI_04 binary
+	// protocol / nreal_hid MCU ASCII protocol). Values are the family's
+	// protocol mode values from transport_traits.display_modes.
+	// current: -1 unknown/unavailable. request: -1 none; the session
+	// consumes and applies it, then refreshes current with a GET.
+	std::atomic<int> display_mode_current{-1};
+	std::atomic<int> display_mode_request{-1};
+	// SBS output rendering of the virtual screen: 0 = auto (active while
+	// the glasses display runs a double-wide SBS mode), 1 = on, 2 = off.
+	std::atomic<int> sbs_output{0};
 	std::atomic<bool> fov_auto{true};
 	std::atomic<int> virtual_source_count{0};
 	std::atomic<float> prediction_ms{10.0f};

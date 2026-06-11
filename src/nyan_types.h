@@ -83,6 +83,14 @@ struct device_entry {
 	model_profile profile;
 };
 
+// One selectable display mode of a glasses family: the protocol's mode value
+// plus the locale key for its dock label. Listed per transport in
+// transport_traits; an empty list hides the dock's display-mode row.
+struct display_mode_option {
+	int value;
+	const char *label_key;
+};
+
 // Per-transport traits. The dock consults this table instead of hardcoding
 // model families, so transport-specific rows follow new devices automatically.
 struct transport_traits {
@@ -90,6 +98,11 @@ struct transport_traits {
 	bool uses_network_endpoint; // transport reads the ip/port settings
 	bool hid_imu_stream;        // IMU streams over HID input reports
 	bool display_brightness;    // brightness set over the serial command port
+	// Display modes switchable over the device's command channel; the
+	// session consumes display_mode_request and maintains
+	// display_mode_current using these protocol values.
+	const display_mode_option *display_modes = nullptr;
+	size_t display_mode_count = 0;
 };
 
 struct vec3d {

@@ -478,14 +478,39 @@ static bool virtual_source_capture_target(nyan_real_virtual_source *s, uint32_t 
 	return true;
 }
 
+// SBS output: the glasses display runs a double-wide side-by-side mode
+// (e.g. 3840x1080, left half = left eye), so the warped view is rendered
+// once per eye into each half. 0 = auto: follow the actual glasses display
+// mode, treating anything at least three times as wide as tall as SBS
+// (16:9 and 16:10 panels doubled give 3.56 / 3.2; ordinary monitors stay
+// well below). Manual ON covers half-SBS, which is not detectable from the
+// mode; the EDID-gated glasses display detection keeps ultrawide desktop
+// monitors out of the auto path.
+static bool sbs_output_active(uint32_t output_w, uint32_t output_h)
+{
+	const int mode = g_device.sbs_output.load(std::memory_order_relaxed);
+	if (mode == 1)
+		return true;
+	if (mode == 2)
+		return false;
+	const uint32_t glasses_w =
+		g_glasses_display_width.load(std::memory_order_relaxed);
+	return glasses_w != 0 && output_h != 0 && output_w >= output_h * 3;
+}
+
 static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *tex,
 				     uint32_t source_w, uint32_t source_h)
 {
+	const bool sbs = sbs_output_active(s->output_width, s->output_height);
+	const uint32_t eye_w = sbs ? s->output_width / 2 : s->output_width;
+
+	// In SBS the per-eye view keeps the per-eye aspect, so the FOV math
+	// uses the half width.
 	set_warp_effect_parameters(s->p_pose_q, s->p_pose_valid, s->p_tan_half_fov,
 				   s->p_screen_distance_m,
 				   s->p_screen_half_size_m, s->p_screen_curve,
 				   s->p_debug_tint,
-				   s->output_width, s->output_height, source_w,
+				   eye_w, s->output_height, source_w,
 				   source_h, hid_device_ready(&g_device));
 
 	const bool previous_srgb = gs_set_linear_srgb(true);
@@ -501,7 +526,14 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 	const size_t passes = gs_technique_begin(tech);
 	for (size_t i = 0; i < passes; i++) {
 		gs_technique_begin_pass(tech, i);
-		gs_draw_sprite(tex, 0, s->output_width, s->output_height);
+		gs_draw_sprite(tex, 0, eye_w, s->output_height);
+		if (sbs) {
+			gs_matrix_push();
+			gs_matrix_translate3f(static_cast<float>(eye_w), 0.0f,
+					      0.0f);
+			gs_draw_sprite(tex, 0, eye_w, s->output_height);
+			gs_matrix_pop();
+		}
 		gs_technique_end_pass(tech);
 	}
 	gs_technique_end(tech);

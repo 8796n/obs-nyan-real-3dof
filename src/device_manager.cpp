@@ -315,6 +315,11 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 			      std::memory_order_relaxed);
 	f->debug_log.store(get_bool_setting(settings, "debug_log", false),
 			   std::memory_order_relaxed);
+	const long long sbs = obs_data_has_user_value(settings, "sbs_output")
+				      ? obs_data_get_int(settings, "sbs_output")
+				      : 0;
+	f->sbs_output.store(sbs >= 0 && sbs <= 2 ? static_cast<int>(sbs) : 0,
+			    std::memory_order_relaxed);
 	const model_id m = detected_hid_model(f);
 	if (next_fov_auto && m != MODEL_UNKNOWN)
 		f->fov_deg.store(profile_for(m).fov_deg, std::memory_order_relaxed);
@@ -418,6 +423,7 @@ void manager_reset_defaults(device_manager *f)
 	f->auto_projector.store(false, std::memory_order_relaxed);
 	f->cursor_fence.store(false, std::memory_order_relaxed);
 	f->debug_log.store(false, std::memory_order_relaxed);
+	f->sbs_output.store(0, std::memory_order_relaxed);
 
 	const model_id m = detected_hid_model(f);
 	if (m != MODEL_UNKNOWN)
@@ -465,6 +471,8 @@ void manager_save_load(obs_data_t *save_data, bool saving, void *)
 				  g_device.cursor_fence.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "debug_log",
 				  g_device.debug_log.load(std::memory_order_relaxed));
+		obs_data_set_int(obj, "sbs_output",
+				 g_device.sbs_output.load(std::memory_order_relaxed));
 		obs_data_set_obj(save_data, key, obj);
 		obs_data_release(obj);
 		return;
