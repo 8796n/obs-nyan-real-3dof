@@ -688,10 +688,13 @@ void wall_ws_text(audio_wall_source *wall, uint64_t conn, obs_data_t *msg)
 		st.source = obs_source_create_private(WS_AUDIO_SOURCE_ID, name,
 						      nullptr);
 		if (st.source) {
-			// Deliberately buffered: the extension's delivery
-			// jitters (page main thread + TCP), and unbuffered
-			// playback turns every late chunk into a crackle.
-			// OBS's adaptive buffering absorbs it.
+			// Unbuffered playback for lip sync. This was a
+			// crackle source while the extension captured on the
+			// page's main thread (dropouts), but the AudioWorklet
+			// capture delivers steady ~10.7 ms chunks over a
+			// TCP_NODELAY socket; revert to buffered if pops
+			// return on loaded systems.
+			obs_source_set_async_unbuffered(st.source, true);
 			st.filter = obs_source_create_private(
 				"nyan_real_3dof_spatial_audio",
 				(std::string(name) + " (spatial)").c_str(),
