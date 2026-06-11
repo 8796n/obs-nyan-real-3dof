@@ -47,6 +47,7 @@ bool obs_module_load(void)
 
 	obs_frontend_add_save_callback(manager_save_load, nullptr);
 	init_dock();
+	g_device.detect_worker = std::thread(detect_worker_fn, &g_device);
 	g_device.worker = std::thread(worker_fn, &g_device);
 
 	blog(LOG_INFO, "[obs-nyan-real-3dof] loaded: %s (libobs %d.%d.%d)", BUILD_INFO,
@@ -64,5 +65,7 @@ void obs_module_unload(void)
 	g_device.reconnect_epoch.fetch_add(1, std::memory_order_relaxed);
 	if (g_device.worker.joinable())
 		g_device.worker.join();
+	if (g_device.detect_worker.joinable())
+		g_device.detect_worker.join();
 	blog(LOG_INFO, "[obs-nyan-real-3dof] unloaded");
 }

@@ -21,7 +21,7 @@ src/
   hid_io.h/.cpp          HID 列挙・機種判別と OVERLAPPED レポート I/O
   device_manager.h/.cpp  グローバル状態・ワーカースレッド・ドック向けセッター
   transports/            機種ファミリーごとの IMU セッション（transports.h に一覧）
-    xreal_tcp.cpp / xreal_air.cpp(.h) / rayneo.cpp / moverio.cpp / rokid.cpp / viture.cpp
+    xreal_tcp.cpp / xreal_air.cpp(.h) / rayneo.cpp / moverio.cpp / rokid.cpp / viture.cpp / nreal_light.cpp
   cursor_fence.cpp(.h)   メガネ画面へのカーソル進入防止（WH_MOUSE_LL フック）
   dock.cpp(.h)           Qt ドック UI とプロジェクター制御
   virtual_source.cpp(.h) 仮想スクリーン入力ソースとワープシェーダー結線
@@ -159,7 +159,9 @@ OBS Studio のソースはこのリポジトリにはベンダリングしてい
 - 装着オフセット（X 軸回りの自由角度）。既知値: XREAL One Standard +180 度、
   XREAL One Pro -150 度、XREAL Air 0 度、RayNeo Air -20 度、MOVERIO BT-40 0 度、
   Rokid Max -4 度 / Rokid Air -1.3 度（参照実装のチルト 0.07 / 0.022 rad より）、
-  VITURE One +6 度 / VITURE Pro +3 度（XRLinuxDriver のピッチ補正より）
+  VITURE One +6 度 / VITURE Pro +3 度（XRLinuxDriver のピッチ補正より）、
+  Nreal Light +15.2 度（ar-drivers-rs のチルト -0.265 rad より。符号は Rokid 実機で
+  確認した変換規約に従う）
 - ジャイロ積分
 - 加速度計による重力補正
 - 静止時のジャイロバイアス自動適応
@@ -213,7 +215,9 @@ IMU の機種判別（USB HID）とは別に、メガネの表示パネルを ED
 XREAL = ベンダー `MRG`（全世代一致）、RayNeo Air = `TCL` 03D4 / モニター名
 "SmartGlasses"、EPSON MOVERIO BT-40 = `SEC` D004（SEC はエプソンのプロジェクター
 とも共有のためプロダクトコードで限定）、Rokid = `LBT` + モニター名 "Rokid"、
-VITURE = `CVT` + モニター名 "VITURE"（CVT は汎用ベンダー ID のためモニター名で限定）です。
+VITURE = `CVT` + モニター名 "VITURE"（CVT は汎用ベンダー ID のためモニター名で限定）、
+Nreal Light = ベンダー `NRL`（MRG 以前の Nreal 専用 ID。実機確認: NRL 0x3132 /
+モニター名 "nreal light"）です。
 この判別は次の 2 箇所から参照されます。
 
 - Display Wall の「メガネのディスプレイを自動除外」
@@ -272,11 +276,32 @@ IMU 受信 transport は機種プロファイルで分岐します。
   1.2 秒無受信で開始コマンドを再送、3 秒で切断して自動再接続する。実機は 60 Hz
   （プロトコル事実は bfvogel/viture-webxr-extension の文書と
   mgschwan/viture_virtual_display を参照。コードの移植はしていない）
+- Nreal Light (`nreal_hid`): Nreal Light は複数の独立 USB デバイスの集合体で、
+  6DoF IMU は MCU ではなく OV580 カメラコプロセッサー（05A9:0680、レポート ID 付き
+  ベンダー HID）にある。コマンドは 7 バイトレポート `[レポート ID 0x02, cmd,
+  subcmd, 0...]`（レポート ID を前置する共有ヘルパー `hid_write_report` は使えない
+  ため専用の書き込みを持つ）。cmd 0x19 subcmd 1/0 で IMU ストリームを開始/停止。
+  ストリームはレポート ID 0x01 の入力レポートで、オフセット 44 から u64 LE ジャイロ
+  タイムスタンプ（ns）・u32 倍率・u32 除数・i32×3（mul/div 度/s 単位）、続いて同形式の
+  加速度ブロック（mul/div g 単位）。ジャイロは deg→rad、加速度は ×9.81 で SI に変換し、
+  軸は (x, -y, -z) で共通フレームへ写像（ar-drivers-rs の nreal_light ドライバーで
+  実証済みの写像。コードの移植はしていない。2026-06 実機確認）。OV580 コンフィグ内の
+  工場バイアスは読まず、トラッカーの静止較正に任せる。1.2 秒無受信で開始コマンドを
+  再送、3 秒で切断して自動再接続する。メガネは未装着・映像なしが続くとスリープして
+  USB ハブごと切断されるため、ストール検出が再接続の入り口になる。実機は 1000 Hz。
+  磁気センサーは別デバイス（STM32 MCU の HID、0486:573C）のテキストプロトコル側に
+  あるため未対応（MAG ヨー補正は利用不可）
 
-判別はワーカースレッドが約 1 秒ごとに実行し、結果を `detected_model`（レジストリの
-1 始まりインデックス、0 = unknown）に保持します。接続中に HID が unknown へ戻った場合、
-または機種に対応する transport が変わった場合は、現在の接続を閉じ、姿勢スナップショットを
-無効化します。
+判別は専用の検出スレッド（`detect_worker_fn`）が約 1 秒ごとに実行し、結果を
+`detected_model`（レジストリの 1 始まりインデックス、0 = unknown）に保持します。
+全 HID インターフェースの列挙（SetupDi ＋ デバイスごとの open・文字列・caps 取得）は
+数十 ms かかり、IMU 読み取りスレッドで同期実行すると 1000 Hz 機種（Nreal Light）では
+既定 32 レポートの HID 入力キュー（= 32 ms 分）を使い切って毎秒 1 回の姿勢ヒッチに
+なるため、セッションループからは分離しています（セッションは atomic を読むだけ）。
+あわせて `open_hid_path_rw` は `HidD_SetNumInputBuffers` でキューを 128 レポートへ
+拡大し、OS スケジューリング起因の取りこぼしにも余裕を持たせています。接続中に HID が
+unknown へ戻った場合、または機種に対応する transport が変わった場合は、現在の接続を
+閉じ、姿勢スナップショットを無効化します。
 
 組み込みテーブルの機種プロファイル（装着オフセットと表示 FOV）:
 
@@ -298,6 +323,7 @@ IMU 受信 transport は機種プロファイルで分岐します。
 | VITURE One Lite | 35CA:1015 / 101B | VITURE One (+6°) | 40° |
 | VITURE Pro | 35CA:1019 / 101D | VITURE Pro (+3°) | 43° |
 | VITURE 系（汎用） | 35CA:* + ProductString に `VITURE` | VITURE One (+6°) | 40° |
+| Nreal Light | 05A9:0680 + ProductString に `OV580`、および 0486:573C | Nreal Light (+15.2°) | 52° |
 
 - `FOV をデバイスから自動` が ON のときは、判別した機種の FOV を使います。OFF の
   とき、または機種が未判別のときは、`Display FOV` スライダーの値を使います。

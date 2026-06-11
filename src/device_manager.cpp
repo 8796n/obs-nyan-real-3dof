@@ -108,17 +108,10 @@ static void apply_auto_fov(device_manager *f, model_id m)
 	f->fov_deg.store(profile_for(m).fov_deg, std::memory_order_relaxed);
 }
 
-// Re-run HID detection at most once per second and, on a model change, update
-// the detected model and (in auto-detect mode with auto FOV) the FOV. Called
-// from both the idle/reconnect loop and the connected recv loop so detection
-// keeps working while the IMU stream is open.
-void refresh_detected_model(device_manager *f, uint64_t &last_detect_ns)
+// Run one HID detection pass and, on a model change, update the detected
+// model and (in auto-detect mode with auto FOV) the FOV.
+static void run_detection_scan(device_manager *f)
 {
-	const uint64_t now_ns = os_gettime_ns();
-	if (last_detect_ns != 0 && now_ns - last_detect_ns < 1000000000ULL)
-		return;
-	last_detect_ns = now_ns;
-
 	const bool dbg = f->debug_log.load(std::memory_order_relaxed);
 	std::string present;
 	const model_id m = detect_hid_model(dbg ? &present : nullptr);
@@ -141,6 +134,21 @@ void refresh_detected_model(device_manager *f, uint64_t &last_detect_ns)
 
 	if (f->fov_auto.load(std::memory_order_relaxed))
 		apply_auto_fov(f, m);
+}
+
+// HID detection runs on its own thread: a full interface enumeration takes
+// tens of milliseconds (SetupDi plus an open and string/caps read per device),
+// which is long enough to stall a 1000 Hz IMU read loop past the default HID
+// input queue depth and show up as a once-per-second pose hitch. The worker
+// and the sessions only read the detected_model atomic this thread maintains.
+void detect_worker_fn(device_manager *f)
+{
+	while (!f->stop.load(std::memory_order_relaxed)) {
+		run_detection_scan(f);
+		for (int i = 0; i < 20 && !f->stop.load(std::memory_order_relaxed);
+		     ++i)
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
 }
 
 void maybe_log_sensor_rate(device_manager *f, rate_log_state &st,
@@ -196,10 +204,7 @@ void maybe_log_sensor_rate(device_manager *f, rate_log_state &st,
 void worker_fn(device_manager *f)
 {
 	uint32_t seen_epoch = f->reconnect_epoch.load(std::memory_order_relaxed);
-	uint64_t last_detect_ns = 0;
 	while (!f->stop.load(std::memory_order_relaxed)) {
-		refresh_detected_model(f, last_detect_ns);
-
 		if (!f->connect_enabled.load(std::memory_order_relaxed) ||
 		    !hid_device_ready(f)) {
 			f->connected.store(false, std::memory_order_relaxed);
@@ -211,22 +216,25 @@ void worker_fn(device_manager *f)
 
 		switch (detected_transport_for(f)) {
 		case imu_transport::one_bridge_tcp:
-			run_one_bridge_tcp_session(f, seen_epoch, last_detect_ns);
+			run_one_bridge_tcp_session(f, seen_epoch);
 			break;
 		case imu_transport::air_hid:
-			run_air_hid_session(f, seen_epoch, last_detect_ns);
+			run_air_hid_session(f, seen_epoch);
 			break;
 		case imu_transport::rayneo_hid:
-			run_rayneo_hid_session(f, seen_epoch, last_detect_ns);
+			run_rayneo_hid_session(f, seen_epoch);
 			break;
 		case imu_transport::sensor_api:
-			run_sensor_api_session(f, seen_epoch, last_detect_ns);
+			run_sensor_api_session(f, seen_epoch);
 			break;
 		case imu_transport::rokid_hid:
-			run_rokid_hid_session(f, seen_epoch, last_detect_ns);
+			run_rokid_hid_session(f, seen_epoch);
 			break;
 		case imu_transport::viture_hid:
-			run_viture_hid_session(f, seen_epoch, last_detect_ns);
+			run_viture_hid_session(f, seen_epoch);
+			break;
+		case imu_transport::nreal_hid:
+			run_nreal_hid_session(f, seen_epoch);
 			break;
 		case imu_transport::none:
 		default:
