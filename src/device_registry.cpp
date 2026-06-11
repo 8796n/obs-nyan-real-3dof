@@ -62,6 +62,15 @@ static const display_mode_option nreal_display_modes[] = {
 	{4, "displaymode.sbs72"},
 };
 
+// VITURE resolution modes: the value is the protocol's ASCII state byte
+// (SET cmd 0x08, '1' = 2D 1920x1080, '2' = 3D SBS 3840x1080), from
+// disassembling the official Linux SDK 1.0.7. VITURE has no refresh-rate
+// switching command, only this resolution toggle.
+static const display_mode_option viture_display_modes[] = {
+	{0x31, "displaymode.mode2d"},
+	{0x32, "displaymode.mode3dsbs"},
+};
+
 transport_traits traits_for(imu_transport t)
 {
 	switch (t) {
@@ -80,7 +89,8 @@ transport_traits traits_for(imu_transport t)
 	case imu_transport::rokid_hid:
 		return {"transport.rokid_hid", false, true, false};
 	case imu_transport::viture_hid:
-		return {"transport.viture_hid", false, true, false};
+		return {"transport.viture_hid", false, true, false,
+			viture_display_modes, std::size(viture_display_modes)};
 	case imu_transport::nreal_hid:
 		return {"transport.nreal_hid", false, true, false,
 			nreal_display_modes, std::size(nreal_display_modes)};
