@@ -18,6 +18,7 @@
 #include "nyan_types.h"
 #include "spatial_audio_filter.h"
 #include "spatial_pan.h"
+#include "tooltip_util.h"
 
 namespace {
 
@@ -98,7 +99,7 @@ obs_properties_t *spatial_properties(void *)
 		props, "azimuth_deg", obs_module_text("spatial.azimuth"), -90.0,
 		90.0, 1.0);
 	obs_property_set_long_description(
-		az, obs_module_text("spatial.azimuth_tooltip"));
+		az, wrapped_tooltip("spatial.azimuth_tooltip").c_str());
 	obs_property_t *mode = obs_properties_add_list(
 		props, "mode", obs_module_text("spatial.mode"),
 		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -110,7 +111,7 @@ obs_properties_t *spatial_properties(void *)
 		props, "distance_gain",
 		obs_module_text("spatial.distance_gain"));
 	obs_property_set_long_description(
-		dist, obs_module_text("spatial.distance_gain_tooltip"));
+		dist, wrapped_tooltip("spatial.distance_gain_tooltip").c_str());
 	return props;
 }
 
