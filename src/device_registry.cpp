@@ -19,6 +19,12 @@ constexpr uint16_t RAYNEO_VID = 0x1BBB;
 constexpr uint16_t EPSON_VID = 0x04B8;
 constexpr uint16_t ROKID_VID = 0x04D2;
 constexpr uint16_t VITURE_VID = 0x35CA;
+// The Nreal Light is a USB hub of separate devices: the IMU streams from the
+// OmniVision OV580 camera coprocessor, the STM32 MCU carries the command HID.
+constexpr uint16_t NREAL_OV580_VID = 0x05A9;
+constexpr uint16_t NREAL_OV580_PID = 0x0680;
+constexpr uint16_t NREAL_MCU_VID = 0x0486;
+constexpr uint16_t NREAL_MCU_PID = 0x573C;
 
 std::vector<device_entry> g_device_registry;
 
@@ -51,6 +57,8 @@ transport_traits traits_for(imu_transport t)
 		return {"transport.rokid_hid", false, true, false};
 	case imu_transport::viture_hid:
 		return {"transport.viture_hid", false, true, false};
+	case imu_transport::nreal_hid:
+		return {"transport.nreal_hid", false, true, false};
 	case imu_transport::none:
 	default:
 		return {"transport.none", false, false, false};
@@ -120,6 +128,15 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 	const model_profile viture_pro = {imu_transport::viture_hid,
 					  MOUNT_X_DEG_VITURE_PRO, 43.0f, 1920,
 					  1080, "VITURE Pro"};
+	// Nreal Light ("Nreal X" in mainland China): raw IMU from the OV580
+	// coprocessor at 1000 Hz. 52 deg diagonal FOV per the published spec.
+	// Registered under both the OV580 (the IMU stream the transport opens)
+	// and the MCU HID so either interface identifies the device. 05A9 is
+	// OmniVision's generic vendor id, so the OV580 row is qualified by its
+	// product string.
+	const model_profile nreal_light = {imu_transport::nreal_hid,
+					   MOUNT_X_DEG_NREAL_LIGHT, 52.0f, 1920,
+					   1080, "Nreal Light"};
 
 	out.push_back({XREAL_VID, 0x0435, L"", one_pro});
 	out.push_back({XREAL_VID, 0x0436, L"", one_pro});
@@ -147,6 +164,8 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 	out.push_back({VITURE_VID, 0x1019, L"", viture_pro});
 	out.push_back({VITURE_VID, 0x101D, L"", viture_pro});
 	out.push_back({VITURE_VID, 0x0000, L"VITURE", viture_one});
+	out.push_back({NREAL_OV580_VID, NREAL_OV580_PID, L"OV580", nreal_light});
+	out.push_back({NREAL_MCU_VID, NREAL_MCU_PID, L"", nreal_light});
 }
 
 // --- user-extensible device registry -------------------------------------
@@ -209,6 +228,10 @@ static bool parse_transport(const char *s, imu_transport &out)
 	}
 	if (_stricmp(s, "viture_hid") == 0 || _stricmp(s, "viture") == 0) {
 		out = imu_transport::viture_hid;
+		return true;
+	}
+	if (_stricmp(s, "nreal_hid") == 0 || _stricmp(s, "nreal") == 0) {
+		out = imu_transport::nreal_hid;
 		return true;
 	}
 	return false;
@@ -332,6 +355,10 @@ static void append_user_devices(std::vector<device_entry> &out,
 			transport_name = "air_hid";
 		else if (e.profile.transport == imu_transport::rayneo_hid)
 			transport_name = "rayneo_hid";
+		else if (e.profile.transport == imu_transport::viture_hid)
+			transport_name = "viture_hid";
+		else if (e.profile.transport == imu_transport::nreal_hid)
+			transport_name = "nreal_hid";
 		blog(LOG_INFO,
 		     "[obs-nyan-real-3dof] user device: %s (%04X:%04X, %s)",
 		     e.profile.name.c_str(), e.vid, e.pid, transport_name);
@@ -392,6 +419,13 @@ static void append_builtin_glasses_display_ids(
 	viture.edid_vendor = nyan_real_pnp_vendor_word("CVT");
 	viture.name_contains = "VITURE";
 	out.push_back(viture);
+
+	// The Nreal Light panel predates the MRG id: it reports NRL 0x3132
+	// with "nreal light" as the monitor name (confirmed on hardware).
+	// NRL is Nreal's own id, so a vendor-only match is safe.
+	nyan_real_glasses_display_id nreal;
+	nreal.edid_vendor = nyan_real_pnp_vendor_word("NRL");
+	out.push_back(nreal);
 }
 
 // Build the device registry once, before the worker thread and the dock start

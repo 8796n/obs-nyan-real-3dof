@@ -3,7 +3,7 @@
 *English · [日本語](README.md)*
 
 Small OBS Studio plugin that reads IMU data from HID-detected AR glasses
-(XREAL, RayNeo, EPSON MOVERIO, Rokid and VITURE) and warps an OBS source as a head-tracked virtual screen.
+(XREAL, RayNeo, EPSON MOVERIO, Rokid, VITURE and Nreal Light) and warps an OBS source as a head-tracked virtual screen.
 
 Module/DLL: `obs-nyan-real-3dof`  
 Sources: `nyan Real 3DoF Virtual Screen` / `nyan Real Display Wall`
@@ -19,11 +19,12 @@ folder into `%ProgramData%\obs-studio\plugins\`. To build from source, see
 ## What It Does
 
 ```text
-HID device detection (XREAL / RayNeo / EPSON MOVERIO / Rokid / VITURE)
+HID device detection (XREAL / RayNeo / EPSON MOVERIO / Rokid / VITURE / Nreal Light)
   -> One-family: TCP 169.254.2.1:52998, 134-byte IMU/MAG record parser
   -> Air-family / RayNeo Air-family / Rokid: HID input report IMU/MAG stream
   -> EPSON MOVERIO: IMU/MAG through the Windows Sensor API
   -> VITURE: on-device fused orientation stream over HID input reports
+  -> Nreal Light: raw IMU stream from the OV580 coprocessor over HID
   -> gyro + accel pose tracker
   -> optional MAG yaw correction
   -> virtual-screen input source in OBS
@@ -48,7 +49,7 @@ from `obs.dll`.
 
 ## Use
 
-1. Connect supported glasses (XREAL / RayNeo / EPSON MOVERIO / Rokid / VITURE) by USB and make sure they
+1. Connect supported glasses (XREAL / RayNeo / EPSON MOVERIO / Rokid / VITURE / Nreal Light) by USB and make sure they
    enumerate as HID.
 2. Start OBS.
 3. Show the `nyan Real 3DoF` dock from the Docks menu.
@@ -242,7 +243,7 @@ separate from the referenced source size and the physical virtual screen size
 in XREAL.
 
 The model (XREAL One / One Pro / 1S / ROG XREAL R1 / Air / Air 2, RayNeo Air
-series, EPSON MOVERIO BT-40, Rokid Max / Air, VITURE One / One Lite / Pro) is auto-detected over HID; the connection and warp start only after HID
+series, EPSON MOVERIO BT-40, Rokid Max / Air, VITURE One / One Lite / Pro, Nreal Light) is auto-detected over HID; the connection and warp start only after HID
 identifies a supported device. The detected device controls the mount offset and
 display FOV; turn off `Auto FOV from device` to set the FOV manually.
 
