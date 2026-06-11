@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>nyan Real Audio Wall connector</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; max-width: 480px; }
+    label { display: block; margin-bottom: 8px; }
+    input { width: 100px; }
+    #saved { color: green; visibility: hidden; }
+  </style>
+</head>
+<body>
+  <h2>nyan Real Audio Wall connector</h2>
+  <label>
+    WebSocket ポート (OBS の nyan Real Audio Wall ソースの「ブラウザ連携ポート」と同じ番号):
+    <input type="number" id="port" min="1024" max="65535">
+  </label>
+  <button id="save">保存</button> <span id="saved">保存しました</span>
+  <p>音を再生中のタブの音声は OBS 経由でのみ再生されます（タブ単体では無音になります）。</p>
+  <script src="options.js"></script>
+</body>
+</html>

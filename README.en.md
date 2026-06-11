@@ -29,6 +29,9 @@ HID device detection (XREAL / RayNeo / EPSON MOVERIO / Rokid / VITURE / Nreal Li
   -> optional MAG yaw correction
   -> display mode switching (Air family / Nreal Light: 2D/3D SBS, refresh rate) + SBS output rendering
   -> virtual-screen input source in OBS
+  -> spatial audio filter (head-tracked pan + screen-distance attenuation)
+  -> Audio Wall source (auto-detects playing apps -> spatial mix by window position)
+  -> Chrome extension link (tab audio over WebSocket, follows window position / tools/chrome-extension)
 ```
 
 This is intentionally separate from `obs-near-real3d`: there is no ONNX model,

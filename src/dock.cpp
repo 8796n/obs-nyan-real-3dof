@@ -35,6 +35,7 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -204,6 +205,63 @@ static bool open_glasses_source_projector(bool log_failure)
 	return true;
 }
 
+// Brand tokens that appear in the glasses' USB audio endpoint names
+// ("スピーカー (XREAL Air 2 Pro)", "nreal light Audio", ...). EPSON is left
+// out on purpose: projector audio endpoints share it.
+static bool is_glasses_audio_name(const char *name)
+{
+	static const char *brands[] = {"xreal", "nreal",  "viture",
+				       "rokid", "rayneo", "moverio"};
+	if (!name)
+		return false;
+	std::string n = name;
+	std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) {
+		return static_cast<char>(std::tolower(c));
+	});
+	for (const char *b : brands) {
+		if (n.find(b) != std::string::npos)
+			return true;
+	}
+	return false;
+}
+
+// Switch OBS's audio monitoring device to the glasses' USB audio endpoint.
+// Returns true once monitoring points at the glasses (already or newly set);
+// false while no glasses audio endpoint is present yet (USB audio can
+// enumerate later than HID, so the caller retries on its poll).
+static bool apply_glasses_monitoring_device()
+{
+	struct match_t {
+		std::string name;
+		std::string id;
+		bool found = false;
+	} m;
+	obs_enum_audio_monitoring_devices(
+		[](void *data, const char *name, const char *id) {
+			auto *m = static_cast<match_t *>(data);
+			if (!is_glasses_audio_name(name))
+				return true;
+			m->name = name ? name : "";
+			m->id = id ? id : "";
+			m->found = true;
+			return false;
+		},
+		&m);
+	if (!m.found)
+		return false;
+	const char *cur_name = nullptr;
+	const char *cur_id = nullptr;
+	obs_get_audio_monitoring_device(&cur_name, &cur_id);
+	if (cur_id && m.id == cur_id)
+		return true;
+	if (!obs_set_audio_monitoring_device(m.name.c_str(), m.id.c_str()))
+		return false;
+	blog(LOG_INFO,
+	     "[obs-nyan-real-3dof] audio monitoring device -> '%s' (glasses detected)",
+	     m.name.c_str());
+	return true;
+}
+
 class NoWheelSpinBox final : public QSpinBox {
 public:
 	using QSpinBox::QSpinBox;
@@ -317,12 +375,17 @@ public:
 			obs_module_text("dock.auto_projector"), device_group);
 		auto_projector_box->setToolTip(
 			obs_module_text("dock.auto_projector_tooltip"));
+		auto_monitor_box = new QCheckBox(
+			obs_module_text("dock.auto_monitor"), device_group);
+		auto_monitor_box->setToolTip(
+			obs_module_text("dock.auto_monitor_tooltip"));
 		cursor_fence_box = new QCheckBox(
 			obs_module_text("dock.cursor_fence"), device_group);
 		cursor_fence_box->setToolTip(
 			obs_module_text("dock.cursor_fence_tooltip"));
 		device_form->addRow(QString(), projector_button);
 		device_form->addRow(QString(), auto_projector_box);
+		device_form->addRow(QString(), auto_monitor_box);
 		device_form->addRow(QString(), cursor_fence_box);
 		root->addWidget(device_group);
 
@@ -458,6 +521,16 @@ public:
 					 g_device.auto_projector.store(
 						 checked,
 						 std::memory_order_relaxed);
+				 });
+		QObject::connect(auto_monitor_box, &QCheckBox::toggled, this,
+				 [this](bool checked) {
+					 g_device.auto_monitor.store(
+						 checked,
+						 std::memory_order_relaxed);
+					 // Re-arm so enabling applies on the
+					 // next poll without replugging.
+					 if (checked)
+						 auto_monitor_applied = false;
 				 });
 		// The fence itself rises/falls on the next poll tick, which
 		// also knows the current glasses-display rect.
@@ -814,6 +887,21 @@ private:
 				std::memory_order_relaxed));
 		}
 		{
+			QSignalBlocker block(auto_monitor_box);
+			auto_monitor_box->setChecked(g_device.auto_monitor.load(
+				std::memory_order_relaxed));
+		}
+		// Monitoring auto-switch: one latch per detected connection.
+		// USB audio can show up later than HID, so retry on every
+		// poll until the endpoint exists.
+		if (detected == MODEL_UNKNOWN) {
+			auto_monitor_applied = false;
+		} else if (g_device.auto_monitor.load(std::memory_order_relaxed) &&
+			   !auto_monitor_applied &&
+			   apply_glasses_monitoring_device()) {
+			auto_monitor_applied = true;
+		}
+		{
 			QSignalBlocker block(cursor_fence_box);
 			cursor_fence_box->setChecked(g_device.cursor_fence.load(
 				std::memory_order_relaxed));
@@ -930,9 +1018,12 @@ private:
 	QCheckBox *debug_box = nullptr;
 	QPushButton *projector_button = nullptr;
 	QCheckBox *auto_projector_box = nullptr;
+	QCheckBox *auto_monitor_box = nullptr;
 	QCheckBox *cursor_fence_box = nullptr;
 	// Auto-open latch: one projector per glasses-display connection.
 	bool auto_projector_opened = false;
+	// Monitoring-device latch: one auto-switch per detected connection.
+	bool auto_monitor_applied = false;
 	// Projectors seen on the glasses screen; closed on display removal.
 	QList<QPointer<QWidget>> glasses_projectors;
 	QTimer *timer = nullptr;
