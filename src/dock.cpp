@@ -48,9 +48,16 @@
 #include "device_manager.h"
 #include "device_registry.h"
 #include "display-wall-source.h"
+#include "tooltip_util.h"
 #include "virtual_source.h"
 
 #ifdef NYAN_REAL_3DOF_WITH_QT_DOCK
+// Word-wrapping tooltip from a locale key (see tooltip_util.h).
+static QString tip(const char *locale_key)
+{
+	return QString::fromStdString(wrapped_tooltip(locale_key));
+}
+
 // First nyan Real virtual screen source, used as the projector content.
 static bool find_virtual_source_name(std::string &name_out)
 {
@@ -460,7 +467,7 @@ public:
 		connect_box->setProperty("class",
 					 "checkbox-icon indicator-visibility");
 		connect_box->setToolTip(
-			obs_module_text("dock.pose_follow_tooltip"));
+			tip("dock.pose_follow_tooltip"));
 		auto *action_row_1 = new QHBoxLayout();
 		auto *recenter = new QPushButton(obs_module_text("recenter"), content);
 		auto *recalibrate = new QPushButton(obs_module_text("recalibrate"), content);
@@ -506,23 +513,23 @@ public:
 						    &brightness_slider,
 						    BRIGHTNESS_SLIDER_SCALE);
 		brightness_row->setToolTip(
-			obs_module_text("brightness_tooltip"));
+			tip("brightness_tooltip"));
 		device_form->addRow(obs_module_text("brightness"),
 				    brightness_row);
 		autobright_box = new QCheckBox(obs_module_text("autobright"),
 					       device_body);
 		autobright_box->setToolTip(
-			obs_module_text("autobright_tooltip"));
+			tip("autobright_tooltip"));
 		device_form->addRow(autobright_box);
 		display_mode_combo = new NoWheelComboBox(device_body);
 		display_mode_combo->setToolTip(
-			obs_module_text("displaymode_tooltip"));
+			tip("displaymode_tooltip"));
 		device_form->addRow(obs_module_text("displaymode"),
 				    display_mode_combo);
 		eye_label = new QLabel(device_body);
 		device_form->addRow(obs_module_text("dock.eye"), eye_label);
 		eye_button = new QPushButton(device_body);
-		eye_button->setToolTip(obs_module_text("dock.eye_tooltip"));
+		eye_button->setToolTip(tip("dock.eye_tooltip"));
 		device_form->addRow(eye_button);
 		device_section = new DockSection(obs_module_text("dock.device"),
 						 device_body, content);
@@ -534,28 +541,28 @@ public:
 		projector_button = new QPushButton(
 			obs_module_text("dock.open_projector"), output_body);
 		projector_button->setToolTip(
-			obs_module_text("dock.open_projector_tooltip"));
+			tip("dock.open_projector_tooltip"));
 		output_form->addRow(projector_button);
 		auto_projector_box = new QCheckBox(
 			obs_module_text("dock.auto_projector"), output_body);
 		auto_projector_box->setToolTip(
-			obs_module_text("dock.auto_projector_tooltip"));
+			tip("dock.auto_projector_tooltip"));
 		output_form->addRow(auto_projector_box);
 		sbs_combo = new NoWheelComboBox(output_body);
 		sbs_combo->addItem(obs_module_text("sbs_output.auto"), 0);
 		sbs_combo->addItem(obs_module_text("sbs_output.on"), 1);
 		sbs_combo->addItem(obs_module_text("sbs_output.off"), 2);
-		sbs_combo->setToolTip(obs_module_text("sbs_output_tooltip"));
+		sbs_combo->setToolTip(tip("sbs_output_tooltip"));
 		output_form->addRow(obs_module_text("sbs_output"), sbs_combo);
 		monitor_combo = new NoWheelComboBox(output_body);
 		monitor_combo->setToolTip(
-			obs_module_text("dock.monitor_out_tooltip"));
+			tip("dock.monitor_out_tooltip"));
 		output_form->addRow(obs_module_text("dock.monitor_out"),
 				    monitor_combo);
 		cursor_fence_box = new QCheckBox(
 			obs_module_text("dock.cursor_fence"), output_body);
 		cursor_fence_box->setToolTip(
-			obs_module_text("dock.cursor_fence_tooltip"));
+			tip("dock.cursor_fence_tooltip"));
 		output_form->addRow(cursor_fence_box);
 		output_section = new DockSection(obs_module_text("dock.output"),
 						 output_body, content);
@@ -569,7 +576,7 @@ public:
 		dist_marker_box = new QCheckBox(
 			obs_module_text("screen_dist_marker"), marker_body);
 		dist_marker_box->setToolTip(
-			obs_module_text("screen_dist_marker_tooltip"));
+			tip("screen_dist_marker_tooltip"));
 		marker_form->addRow(dist_marker_box);
 		marker_section = new DockSection(obs_module_text("dock.marker"),
 						 marker_body, content);
@@ -620,7 +627,7 @@ public:
 							&distance_slider,
 							DISTANCE_SLIDER_SCALE);
 		distance_row->setToolTip(
-			obs_module_text("screen_distance_tooltip"));
+			tip("screen_distance_tooltip"));
 		screen_form->addRow(obs_module_text("screen_distance_m"),
 				    distance_row);
 		screen_form->addRow(obs_module_text("screen_size_factor"),
@@ -631,7 +638,7 @@ public:
 						       CURVE_SLIDER_SCALE));
 		auto *ipd_row = make_double_slider(screen_body, ipd_spin,
 						   &ipd_slider, IPD_SLIDER_SCALE);
-		ipd_row->setToolTip(obs_module_text("ipd_tooltip"));
+		ipd_row->setToolTip(tip("ipd_tooltip"));
 		screen_form->addRow(obs_module_text("ipd_mm"), ipd_row);
 		screen_form->addRow(obs_module_text("dock.screen_result"), screen_label);
 		screen_section = new DockSection(obs_module_text("dock.screen"),

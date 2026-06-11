@@ -2,6 +2,7 @@
 // Copyright (C) 2026 8796n <info@8796.jp>
 
 #include "display-wall-source.h"
+#include "tooltip_util.h"
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -1326,7 +1327,7 @@ static obs_properties_t *display_wall_properties(void *data)
 		props, "row_layout", obs_module_text("display_wall.row_layout"),
 		OBS_TEXT_MULTILINE);
 	obs_property_set_long_description(
-		rows, obs_module_text("display_wall.row_layout_tooltip"));
+		rows, wrapped_tooltip("display_wall.row_layout_tooltip").c_str());
 
 	obs_property_t *align = obs_properties_add_list(
 		props, "row_align", obs_module_text("display_wall.row_align"),
@@ -1351,22 +1352,24 @@ static obs_properties_t *display_wall_properties(void *data)
 		obs_module_text("display_wall.exclude_glasses"));
 	obs_property_set_long_description(
 		exclude_glasses_prop,
-		obs_module_text("display_wall.exclude_glasses_tooltip"));
+		wrapped_tooltip("display_wall.exclude_glasses_tooltip").c_str());
 	obs_property_t *sync_output = obs_properties_add_bool(
 		props, "sync_output_size",
 		obs_module_text("display_wall.sync_output_size"));
 	obs_property_set_long_description(
-		sync_output, obs_module_text("display_wall.sync_output_size_tooltip"));
+		sync_output,
+		wrapped_tooltip("display_wall.sync_output_size_tooltip").c_str());
 	obs_property_t *filter = obs_properties_add_text(
 		props, "name_filter", obs_module_text("display_wall.name_filter"),
 		OBS_TEXT_DEFAULT);
 	obs_property_set_long_description(
-		filter, obs_module_text("display_wall.name_filter_tooltip"));
+		filter, wrapped_tooltip("display_wall.name_filter_tooltip").c_str());
 	obs_property_t *exclude = obs_properties_add_text(
 		props, "exclude_filter", obs_module_text("display_wall.exclude_filter"),
 		OBS_TEXT_DEFAULT);
 	obs_property_set_long_description(
-		exclude, obs_module_text("display_wall.exclude_filter_tooltip"));
+		exclude,
+		wrapped_tooltip("display_wall.exclude_filter_tooltip").c_str());
 	obs_properties_add_bool(props, "capture_cursor",
 				obs_module_text("display_wall.capture_cursor"));
 	obs_properties_add_bool(props, "force_sdr",

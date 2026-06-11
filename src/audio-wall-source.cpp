@@ -37,6 +37,7 @@
 #include "audio-wall-source.h"
 #include "display-wall-source.h"
 #include "spatial_pan.h"
+#include "tooltip_util.h"
 #include "ws_audio_server.h"
 
 namespace {
@@ -1079,17 +1080,17 @@ obs_properties_t *wall_properties(void *data)
 		props, "distance_gain",
 		obs_module_text("spatial.distance_gain"));
 	obs_property_set_long_description(
-		dist, obs_module_text("spatial.distance_gain_tooltip"));
+		dist, wrapped_tooltip("spatial.distance_gain_tooltip").c_str());
 	obs_property_t *exclude = obs_properties_add_text(
 		props, "exclude", obs_module_text("audiowall.exclude"),
 		OBS_TEXT_DEFAULT);
 	obs_property_set_long_description(
-		exclude, obs_module_text("audiowall.exclude_tooltip"));
+		exclude, wrapped_tooltip("audiowall.exclude_tooltip").c_str());
 	obs_property_t *port = obs_properties_add_int(
 		props, "ws_port", obs_module_text("audiowall.ws_port"), 1024,
 		65535, 1);
 	obs_property_set_long_description(
-		port, obs_module_text("audiowall.ws_port_tooltip"));
+		port, wrapped_tooltip("audiowall.ws_port_tooltip").c_str());
 	return props;
 }
 
