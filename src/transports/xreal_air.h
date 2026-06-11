@@ -16,3 +16,7 @@ std::vector<uint8_t> build_air_packet(uint8_t msg_id,
 				      const std::vector<uint8_t> &payload = {});
 bool air_send_packet(HANDLE h, const hid_interface_info &info, uint8_t msg_id,
 		     const std::vector<uint8_t> &payload = {});
+
+// Standard IEEE 802.3 CRC32, shared by the Air packet framing and the Nreal
+// Light MCU ASCII protocol.
+uint32_t air_crc32(const uint8_t *data, size_t len);

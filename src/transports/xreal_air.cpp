@@ -3,6 +3,7 @@
 // XREAL Air family: IMU/MAG over HID input reports after a START command.
 #include <obs-module.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -127,7 +128,7 @@ static bool decode_air_report(const uint8_t *data, size_t len,
 	return out.has_imu || out.has_mag;
 }
 
-static uint32_t air_crc32(const uint8_t *data, size_t len)
+uint32_t air_crc32(const uint8_t *data, size_t len)
 {
 	static uint32_t table[256] = {};
 	static bool table_ready = false;
@@ -174,6 +175,110 @@ bool air_send_packet(HANDLE h, const hid_interface_info &info, uint8_t msg_id,
 {
 	return hid_write_report(h, info.output_report_len,
 				build_air_packet(msg_id, payload), 250);
+}
+
+// --- MI_04 control interface ------------------------------------------------
+// Besides the IMU interface, the Air family exposes a control HID interface
+// (MI_04) speaking a different framing: [0]=0xFD, [1..4]=CRC32 LE over bytes
+// [5, 5+payload_len), [5..6]=payload_len u16 LE (= 17 + data length),
+// [7..14]=timestamp (may stay zero), [15..16]=msgId u16 LE, [22..]=data.
+// Responses mirror the layout with a status byte at [22] and data from [23].
+// msgId 7/8 get/set the display mode (verified on Air 2 / Air 2 Pro hardware,
+// MyGlasses2.0/analysis/12; layout from the same source).
+constexpr uint16_t AIR_MCU_MSG_GET_DISPLAY_MODE = 7;
+constexpr uint16_t AIR_MCU_MSG_SET_DISPLAY_MODE = 8;
+
+static std::vector<uint8_t> build_air_mcu_packet(uint16_t msg_id,
+						 const std::vector<uint8_t> &data)
+{
+	std::vector<uint8_t> pkt(64, 0);
+	const uint16_t payload_len = static_cast<uint16_t>(17 + data.size());
+	pkt[0] = 0xFD;
+	pkt[5] = static_cast<uint8_t>(payload_len & 0xFF);
+	pkt[6] = static_cast<uint8_t>(payload_len >> 8);
+	pkt[15] = static_cast<uint8_t>(msg_id & 0xFF);
+	pkt[16] = static_cast<uint8_t>(msg_id >> 8);
+	if (!data.empty())
+		std::memcpy(&pkt[22], data.data(), data.size());
+	const uint32_t crc = air_crc32(&pkt[5], payload_len);
+	pkt[1] = static_cast<uint8_t>(crc & 0xFF);
+	pkt[2] = static_cast<uint8_t>((crc >> 8) & 0xFF);
+	pkt[3] = static_cast<uint8_t>((crc >> 16) & 0xFF);
+	pkt[4] = static_cast<uint8_t>((crc >> 24) & 0xFF);
+	return pkt;
+}
+
+// Send a control command and wait briefly for its response. Returns false on
+// timeout; *out_status is the response status byte (0 = OK).
+static bool air_mcu_exchange(HANDLE h, const hid_interface_info &info,
+			     uint16_t msg_id, const std::vector<uint8_t> &data,
+			     uint8_t *out_status, std::vector<uint8_t> *out_data)
+{
+	if (!hid_write_report(h, info.output_report_len,
+			      build_air_mcu_packet(msg_id, data), 250))
+		return false;
+	std::vector<uint8_t> rep;
+	const uint64_t start = os_gettime_ns();
+	while (os_gettime_ns() - start < 800000000ULL) {
+		if (!hid_read_report(h, info.input_report_len, rep, 100))
+			continue;
+		const uint8_t *d = rep.data();
+		size_t len = rep.size();
+		// Windows keeps the leading report-id byte (0 here).
+		if (len >= 2 && d[0] == 0x00 && d[1] == 0xFD) {
+			d++;
+			len--;
+		}
+		if (len < 23 || d[0] != 0xFD || read_u16_le(d + 15) != msg_id)
+			continue;
+		const uint16_t payload_len = read_u16_le(d + 5);
+		if (out_status)
+			*out_status = d[22];
+		if (out_data) {
+			out_data->clear();
+			const size_t end = std::min<size_t>(
+				5 + static_cast<size_t>(payload_len), len);
+			for (size_t i = 23; i < end && d[i]; ++i)
+				out_data->push_back(d[i]);
+		}
+		return true;
+	}
+	return false;
+}
+
+// The control interface is MI_04 on every Air generation (the reference
+// drivers hardcode it as well); nothing streams on it, so it is identified by
+// the interface number in the device path rather than by probing.
+static HANDLE open_air_control_iface(hid_interface_info &selected)
+{
+	for (const auto &info : enumerate_hid_interfaces()) {
+		if (profile_for(info.model).transport != imu_transport::air_hid ||
+		    is_consumer_control_hid(info))
+			continue;
+		if (info.path.find(L"mi_04") == std::wstring::npos &&
+		    info.path.find(L"MI_04") == std::wstring::npos)
+			continue;
+		HANDLE h = open_hid_path_rw(info.path);
+		if (h == INVALID_HANDLE_VALUE)
+			continue;
+		selected = info;
+		return h;
+	}
+	return INVALID_HANDLE_VALUE;
+}
+
+// Read the current display mode into display_mode_current (-1 on failure).
+static void air_refresh_display_mode(device_manager *f, HANDLE ctrl,
+				     const hid_interface_info &info)
+{
+	uint8_t status = 0xFF;
+	std::vector<uint8_t> data;
+	int mode = -1;
+	if (air_mcu_exchange(ctrl, info, AIR_MCU_MSG_GET_DISPLAY_MODE, {},
+			     &status, &data) &&
+	    status == 0 && !data.empty())
+		mode = data[0];
+	f->display_mode_current.store(mode, std::memory_order_relaxed);
 }
 
 static bool looks_like_air_report(const std::vector<uint8_t> &data)
@@ -245,6 +350,18 @@ void run_air_hid_session(device_manager *f, uint32_t &seen_epoch)
 	if (f->debug_log.load(std::memory_order_relaxed))
 		blog(LOG_INFO, "[obs-nyan-real-3dof] Air HID connected");
 
+	// Control interface for display-mode switching; the IMU stream works
+	// without it, so a failed open only leaves the dock row disabled.
+	hid_interface_info ctrl_info;
+	HANDLE ctrl = open_air_control_iface(ctrl_info);
+	if (ctrl != INVALID_HANDLE_VALUE)
+		air_refresh_display_mode(f, ctrl, ctrl_info);
+	if (f->debug_log.load(std::memory_order_relaxed))
+		blog(LOG_INFO,
+		     "[obs-nyan-real-3dof] Air control interface %s (display mode %d)",
+		     ctrl != INVALID_HANDLE_VALUE ? "open" : "unavailable",
+		     f->display_mode_current.load(std::memory_order_relaxed));
+
 	air_timestamp_state ts_state;
 	uint32_t seq = 0;
 	uint64_t last_rx_ns = os_gettime_ns();
@@ -257,6 +374,25 @@ void run_air_hid_session(device_manager *f, uint32_t &seen_epoch)
 		if (!hid_device_ready(f) ||
 		    detected_transport_for(f) != imu_transport::air_hid)
 			break;
+
+		// Display-mode change requested from the dock. The mode switch
+		// re-clocks the display (the screen blanks for a moment), so
+		// the brief blocking exchange here is invisible in practice.
+		const int mode_req = f->display_mode_request.exchange(
+			-1, std::memory_order_relaxed);
+		if (mode_req >= 0 && ctrl != INVALID_HANDLE_VALUE) {
+			uint8_t status = 0xFF;
+			air_mcu_exchange(ctrl, ctrl_info,
+					 AIR_MCU_MSG_SET_DISPLAY_MODE,
+					 {static_cast<uint8_t>(mode_req)},
+					 &status, nullptr);
+			if (f->debug_log.load(std::memory_order_relaxed))
+				blog(LOG_INFO,
+				     "[obs-nyan-real-3dof] Air display mode -> %d "
+				     "(status %d)",
+				     mode_req, status);
+			air_refresh_display_mode(f, ctrl, ctrl_info);
+		}
 
 		std::vector<uint8_t> report;
 		if (!hid_read_report(h, info.input_report_len, report, 250)) {
@@ -283,6 +419,9 @@ void run_air_hid_session(device_manager *f, uint32_t &seen_epoch)
 	}
 
 	air_send_packet(h, info, AIR_MSG_START_IMU_DATA, {0x00});
+	if (ctrl != INVALID_HANDLE_VALUE)
+		CloseHandle(ctrl);
+	f->display_mode_current.store(-1, std::memory_order_relaxed);
 	CloseHandle(h);
 	f->connected.store(false, std::memory_order_relaxed);
 	publish_pose(f, false);

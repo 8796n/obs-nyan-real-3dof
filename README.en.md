@@ -27,6 +27,7 @@ HID device detection (XREAL / RayNeo / EPSON MOVERIO / Rokid / VITURE / Nreal Li
   -> Nreal Light: raw IMU stream from the OV580 coprocessor over HID
   -> gyro + accel pose tracker
   -> optional MAG yaw correction
+  -> display mode switching (Air family / Nreal Light: 2D/3D SBS, refresh rate) + SBS output rendering
   -> virtual-screen input source in OBS
 ```
 

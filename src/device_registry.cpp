@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <string>
 
 #include "display-wall-source.h"
@@ -39,13 +40,36 @@ const model_profile &profile_for(model_id m)
 	return g_device_registry[static_cast<size_t>(m) - 1].profile;
 }
 
+// XREAL Air family display modes set over the MI_04 control interface
+// (msgId 8). Values verified on Air 2 / Air 2 Pro hardware
+// (MyGlasses2.0/analysis/12, 2026-04): 72/90Hz modes also lower the OLED
+// duty cycle (low persistence). 120Hz needs an Air 2 panel; unsupported
+// modes are rejected by the firmware and the GET refresh keeps the truth.
+// Half-SBS (8) and SBS 90Hz (9) are omitted: the SET succeeds but the
+// display stays blank (8 on Air 2 Pro, 9 on Air 2; both hardware-confirmed).
+static const display_mode_option air_display_modes[] = {
+	{1, "displaymode.mirror60"},  {5, "displaymode.mirror72"},
+	{10, "displaymode.mirror90"}, {11, "displaymode.mirror120"},
+	{3, "displaymode.sbs60"},     {4, "displaymode.sbs72"},
+};
+
+// Nreal Light display modes set over the MCU ASCII protocol (SET '3' with
+// the ASCII digit of the value). The 540p half-SBS mode (2) is omitted.
+// Mode 4 (SBS 72Hz) requires the ELLA hardware revision.
+static const display_mode_option nreal_display_modes[] = {
+	{1, "displaymode.mirror60"},
+	{3, "displaymode.sbs60"},
+	{4, "displaymode.sbs72"},
+};
+
 transport_traits traits_for(imu_transport t)
 {
 	switch (t) {
 	case imu_transport::one_bridge_tcp:
 		return {"transport.one_bridge_tcp", true, false, false};
 	case imu_transport::air_hid:
-		return {"transport.air_hid", false, true, false};
+		return {"transport.air_hid", false, true, false,
+			air_display_modes, std::size(air_display_modes)};
 	case imu_transport::rayneo_hid:
 		return {"transport.rayneo_hid", false, true, false};
 	case imu_transport::sensor_api:
@@ -58,7 +82,8 @@ transport_traits traits_for(imu_transport t)
 	case imu_transport::viture_hid:
 		return {"transport.viture_hid", false, true, false};
 	case imu_transport::nreal_hid:
-		return {"transport.nreal_hid", false, true, false};
+		return {"transport.nreal_hid", false, true, false,
+			nreal_display_modes, std::size(nreal_display_modes)};
 	case imu_transport::none:
 	default:
 		return {"transport.none", false, false, false};

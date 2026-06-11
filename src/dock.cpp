@@ -10,6 +10,7 @@
 #ifdef NYAN_REAL_3DOF_WITH_QT_DOCK
 #include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QDockWidget>
 #include <QFormLayout>
@@ -219,6 +220,16 @@ protected:
 	void wheelEvent(QWheelEvent *event) override { event->ignore(); }
 };
 
+// The dock lives in a scroll area; a stray wheel over the display-mode combo
+// would send a mode-switch command to the glasses.
+class NoWheelComboBox final : public QComboBox {
+public:
+	using QComboBox::QComboBox;
+
+protected:
+	void wheelEvent(QWheelEvent *event) override { event->ignore(); }
+};
+
 class NyanRealDock final : public QScrollArea {
 public:
 	explicit NyanRealDock(QWidget *parent = nullptr) : QScrollArea(parent)
@@ -287,6 +298,17 @@ public:
 		autobright_box->setToolTip(
 			obs_module_text("autobright_tooltip"));
 		device_form->addRow(QString(), autobright_box);
+		display_mode_combo = new NoWheelComboBox(device_group);
+		display_mode_combo->setToolTip(
+			obs_module_text("displaymode_tooltip"));
+		device_form->addRow(obs_module_text("displaymode"),
+				    display_mode_combo);
+		sbs_combo = new NoWheelComboBox(device_group);
+		sbs_combo->addItem(obs_module_text("sbs_output.auto"), 0);
+		sbs_combo->addItem(obs_module_text("sbs_output.on"), 1);
+		sbs_combo->addItem(obs_module_text("sbs_output.off"), 2);
+		sbs_combo->setToolTip(obs_module_text("sbs_output_tooltip"));
+		device_form->addRow(obs_module_text("sbs_output"), sbs_combo);
 		projector_button = new QPushButton(
 			obs_module_text("dock.open_projector"), device_group);
 		projector_button->setToolTip(
@@ -379,6 +401,25 @@ public:
 				 [](bool checked) {
 					 g_device.autobright_request.store(
 						 checked ? 1 : 0,
+						 std::memory_order_relaxed);
+				 });
+		// activated fires only on user interaction, so the periodic
+		// refresh sync below cannot echo a request back to the device.
+		QObject::connect(display_mode_combo,
+				 QOverload<int>::of(&QComboBox::activated), this,
+				 [this](int index) {
+					 const QVariant v =
+						 display_mode_combo->itemData(index);
+					 if (v.isValid())
+						 g_device.display_mode_request.store(
+							 v.toInt(),
+							 std::memory_order_relaxed);
+				 });
+		QObject::connect(sbs_combo,
+				 QOverload<int>::of(&QComboBox::activated), this,
+				 [this](int index) {
+					 g_device.sbs_output.store(
+						 sbs_combo->itemData(index).toInt(),
 						 std::memory_order_relaxed);
 				 });
 		QObject::connect(ip_edit, &QLineEdit::editingFinished, this, [this]() {
@@ -621,6 +662,46 @@ private:
 						   tr.display_brightness);
 			device_form->setRowVisible(autobright_box,
 						   tr.display_brightness);
+			// Display-mode choices follow the detected family.
+			{
+				QSignalBlocker block(display_mode_combo);
+				display_mode_combo->clear();
+				for (size_t i = 0; i < tr.display_mode_count; ++i)
+					display_mode_combo->addItem(
+						obs_module_text(
+							tr.display_modes[i]
+								.label_key),
+						tr.display_modes[i].value);
+			}
+			device_form->setRowVisible(display_mode_combo,
+						   tr.display_mode_count > 0);
+		}
+		// The display-mode row is adjustable while the session has the
+		// device's command channel open (-1 = unknown/unavailable).
+		const int display_mode =
+			g_device.display_mode_current.load(std::memory_order_relaxed);
+		display_mode_combo->setEnabled(display_mode >= 0);
+		if (display_mode >= 0 &&
+		    g_device.display_mode_request.load(std::memory_order_relaxed) <
+			    0 &&
+		    !display_mode_combo->hasFocus()) {
+			const int idx = display_mode_combo->findData(display_mode);
+			// Unknown values (e.g. a mode set by another tool) keep
+			// the previous selection rather than picking a wrong one.
+			if (idx >= 0 && idx != display_mode_combo->currentIndex()) {
+				QSignalBlocker block(display_mode_combo);
+				display_mode_combo->setCurrentIndex(idx);
+			}
+		}
+		{
+			const int sbs =
+				g_device.sbs_output.load(std::memory_order_relaxed);
+			const int idx = sbs_combo->findData(sbs);
+			if (idx >= 0 && idx != sbs_combo->currentIndex() &&
+			    !sbs_combo->hasFocus()) {
+				QSignalBlocker block(sbs_combo);
+				sbs_combo->setCurrentIndex(idx);
+			}
 		}
 		// Brightness is only adjustable while the session has the
 		// serial command port open (-1 = unknown/unavailable) and the
@@ -790,6 +871,8 @@ private:
 	QSlider *brightness_slider = nullptr;
 	QWidget *brightness_row = nullptr;
 	QCheckBox *autobright_box = nullptr;
+	QComboBox *display_mode_combo = nullptr;
+	QComboBox *sbs_combo = nullptr;
 	int last_transport = -1; // imu_transport value last applied to row visibility
 	QDoubleSpinBox *prediction_spin = nullptr;
 	QSlider *prediction_slider = nullptr;
