@@ -36,6 +36,9 @@ struct device_manager {
 	std::atomic<bool> cursor_fence{false};
 	// Marker 6DoF: printed-tag size (black square side) in millimeters.
 	std::atomic<float> tag_size_mm{80.0f};
+	// Set the virtual-screen distance from the measured head-to-tag
+	// distance every time the marker origin anchors (i.e. per recenter).
+	std::atomic<bool> screen_dist_from_marker{false};
 	std::atomic<int> detected_model{MODEL_UNKNOWN}; // model_id, set by worker
 	// Mount override in centidegrees, reported by the device itself (RayNeo
 	// derives it from the device-info board id). INT32_MIN = no override,
@@ -116,6 +119,9 @@ bool publish_external_pose(device_manager *f, const quatd &device_q,
 // convention) from the marker tracker thread.
 void publish_marker_position(device_manager *f, const vec3d &p_tag_world,
 			     uint32_t ts_us);
+// Current recentered orientation (pose_snapshot.q) for the marker thread's
+// planar-pose disambiguation.
+quatd device_pose_orientation(device_manager *f);
 void maybe_log_sensor_rate(device_manager *f, rate_log_state &st,
 			   const char *transport);
 void worker_fn(device_manager *f);

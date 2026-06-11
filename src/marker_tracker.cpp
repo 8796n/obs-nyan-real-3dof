@@ -21,6 +21,7 @@
 #include <obs-module.h>
 #include <util/platform.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -145,6 +146,62 @@ static bool read_gray_frame(IMFSourceReader *reader, std::vector<uint8_t> &gray)
 	return true;
 }
 
+// The Eye tracking camera is a ~99 deg HFOV wide-angle whose projection is
+// far closer to equidistant fisheye (r = f*theta) than to the pinhole model
+// the pose solver assumes (r = f*tan(theta)). Both agree near the center
+// (where fx was calibrated), but at the image edge the uncorrected corners
+// bend the pose estimate and the position swings by tens of centimeters.
+// Map detected points onto the pinhole model before solving.
+static void undistort_point(double *u, double *v)
+{
+	const double dx = *u - EYE_CAM_W / 2.0;
+	const double dy = *v - EYE_CAM_H / 2.0;
+	const double r = std::sqrt(dx * dx + dy * dy);
+	if (r < 1e-6)
+		return;
+	const double theta = r / EYE_CAM_FX;
+	if (theta >= 1.4)
+		return; // ~80 deg off-axis: tan() blows up, leave it alone
+	const double scale = EYE_CAM_FX * std::tan(theta) / r;
+	*u = EYE_CAM_W / 2.0 + dx * scale;
+	*v = EYE_CAM_H / 2.0 + dy * scale;
+}
+
+// Camera position in the tag frame (-R^T t), mapped to the world axis
+// convention. Tag frame is image-aligned: x right, y down, z into the tag;
+// an upright tag facing the viewer maps to X right, Y up, Z back.
+static vec3d tag_world_pos(const apriltag_pose_t &pose)
+{
+	double px = 0, py = 0, pz = 0;
+	for (int r = 0; r < 3; ++r) {
+		const double tr = matd_get(pose.t, r, 0);
+		px -= matd_get(pose.R, r, 0) * tr;
+		py -= matd_get(pose.R, r, 1) * tr;
+		pz -= matd_get(pose.R, r, 2) * tr;
+	}
+	return {px, -py, -pz};
+}
+
+static double dist2(const vec3d &a, const vec3d &b)
+{
+	const double dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+	return dx * dx + dy * dy + dz * dz;
+}
+
+// Tag z-axis (the tag's facing normal) in the head frame: column 2 of the
+// tag->camera rotation, with the camera-to-head axis mapping applied
+// (camera x right, y down, z forward -> head x right, y up, z back).
+static vec3d tag_normal_head(const apriltag_pose_t &pose)
+{
+	return {matd_get(pose.R, 0, 2), -matd_get(pose.R, 1, 2),
+		-matd_get(pose.R, 2, 2)};
+}
+
+static double dot3(const vec3d &a, const vec3d &b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
 void marker_worker_fn(device_manager *f)
 {
 	const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -179,6 +236,15 @@ void marker_worker_fn(device_manager *f)
 		unsigned frames = 0, hits = 0;
 		vec3d last_pos = {};
 		double last_z = 0.0;
+		vec3d last_raw = {};
+		bool have_last_raw = false;
+		vec3d normal_ref = {};
+		bool have_normal_ref = false;
+		// Oscillation diagnostics for the 2 s debug summary.
+		vec3d acc_sum = {}, acc_sum2 = {};
+		unsigned acc_n = 0;
+		unsigned flip_picks = 0;
+		double max_step_m = 0.0;
 
 		while (!f->stop.load(std::memory_order_relaxed)) {
 			if (!read_gray_frame(reader, gray)) {
@@ -217,6 +283,10 @@ void marker_worker_fn(device_manager *f)
 			}
 			if (best) {
 				hits++;
+				for (int c = 0; c < 4; ++c)
+					undistort_point(&best->p[c][0],
+							&best->p[c][1]);
+				undistort_point(&best->c[0], &best->c[1]);
 				apriltag_detection_info_t info = {};
 				info.det = best;
 				info.tagsize =
@@ -228,34 +298,130 @@ void marker_worker_fn(device_manager *f)
 				info.fy = EYE_CAM_FX;
 				info.cx = EYE_CAM_W / 2.0;
 				info.cy = EYE_CAM_H / 2.0;
-				apriltag_pose_t pose = {};
-				estimate_tag_pose(&info, &pose);
-				if (pose.R && pose.t) {
-					// Camera position in the tag frame:
-					// -R^T t.
-					double px = 0, py = 0, pz = 0;
-					for (int r = 0; r < 3; ++r) {
-						const double tr =
-							matd_get(pose.t, r, 0);
-						px -= matd_get(pose.R, r, 0) * tr;
-						py -= matd_get(pose.R, r, 1) * tr;
-						pz -= matd_get(pose.R, r, 2) * tr;
-					}
-					// Tag frame is image-aligned: x right,
-					// y down, z into the tag. An upright
-					// tag facing the viewer maps to the
-					// world frame (X right, Y up, Z back)
-					// as below.
-					const vec3d p_world = {px, -py, -pz};
-					publish_marker_position(f, p_world,
-								now_us32());
-					last_pos = p_world;
-					last_z = matd_get(pose.t, 2, 0);
+				// Planar pose has two solutions whose errors
+				// nearly tie at frontal views; the naive
+				// lowest-error pick then alternates frame to
+				// frame (a few-cm sawtooth that reads as
+				// screen judder). When the errors are close,
+				// prefer the solution nearer to the previous
+				// frame instead.
+				double err1 = 0.0, err2 = 0.0;
+				apriltag_pose_t pose1 = {}, pose2 = {};
+				estimate_tag_pose_orthogonal_iteration(
+					&info, &err1, &pose1, &err2, &pose2,
+					50);
+				vec3d cand[2] = {};
+				vec3d cand_n[2] = {};
+				double cand_z[2] = {0.0, 0.0};
+				double cand_err[2] = {0.0, 0.0};
+				int n_cand = 0;
+				if (pose1.R && pose1.t) {
+					cand[n_cand] = tag_world_pos(pose1);
+					cand_n[n_cand] = tag_normal_head(pose1);
+					cand_z[n_cand] = matd_get(pose1.t, 2, 0);
+					cand_err[n_cand] = err1;
+					n_cand++;
 				}
-				if (pose.R)
-					matd_destroy(pose.R);
-				if (pose.t)
-					matd_destroy(pose.t);
+				if (pose2.R && pose2.t) {
+					cand[n_cand] = tag_world_pos(pose2);
+					cand_n[n_cand] = tag_normal_head(pose2);
+					cand_z[n_cand] = matd_get(pose2.t, 2, 0);
+					cand_err[n_cand] = err2;
+					n_cand++;
+				}
+				// Rotate the candidate tag normals into the
+				// recentered world: the tag is a static
+				// object, so its world normal must not move.
+				// The IMU orientation is precise, which makes
+				// this the reliable branch discriminator the
+				// reprojection errors cannot provide near
+				// frontal views.
+				const quatd qrel = device_pose_orientation(f);
+				vec3d n_world[2] = {};
+				for (int c = 0; c < n_cand; ++c)
+					n_world[c] = rotate_vector(qrel,
+								   cand_n[c]);
+				int pick = 0;
+				if (n_cand == 2) {
+					const int by_err =
+						cand_err[0] <= cand_err[1] ? 0
+									   : 1;
+					const double lo = cand_err[by_err];
+					const double hi = cand_err[1 - by_err];
+					const double d0 = have_normal_ref
+								  ? dot3(n_world[0],
+									 normal_ref)
+								  : 0.0;
+					const double d1 = have_normal_ref
+								  ? dot3(n_world[1],
+									 normal_ref)
+								  : 0.0;
+					if (hi > lo * 3.0)
+						pick = by_err;
+					else if (have_normal_ref &&
+						 std::fabs(d0 - d1) > 0.02)
+						pick = d0 > d1 ? 0 : 1;
+					else if (have_last_raw)
+						pick = dist2(cand[0], last_raw) <=
+							       dist2(cand[1],
+								     last_raw)
+							       ? 0
+							       : 1;
+					else
+						pick = by_err;
+					if (pick != by_err)
+						flip_picks++;
+					// Learn the tag's world normal from
+					// unambiguous frames only (off-frontal
+					// views separate the two solutions).
+					if (hi > lo * 3.0) {
+						normal_ref.x +=
+							(n_world[pick].x -
+							 normal_ref.x) *
+							0.1;
+						normal_ref.y +=
+							(n_world[pick].y -
+							 normal_ref.y) *
+							0.1;
+						normal_ref.z +=
+							(n_world[pick].z -
+							 normal_ref.z) *
+							0.1;
+						have_normal_ref = true;
+					}
+				} else if (n_cand == 1 && !have_normal_ref) {
+					normal_ref = n_world[0];
+					have_normal_ref = true;
+				}
+				if (n_cand > 0) {
+					if (have_last_raw)
+						max_step_m = std::max(
+							max_step_m,
+							std::sqrt(dist2(
+								cand[pick],
+								last_raw)));
+					acc_sum.x += cand[pick].x;
+					acc_sum.y += cand[pick].y;
+					acc_sum.z += cand[pick].z;
+					acc_sum2.x += cand[pick].x * cand[pick].x;
+					acc_sum2.y += cand[pick].y * cand[pick].y;
+					acc_sum2.z += cand[pick].z * cand[pick].z;
+					acc_n++;
+					publish_marker_position(f, cand[pick],
+								now_us32());
+					last_raw = cand[pick];
+					have_last_raw = true;
+					last_pos = cand[pick];
+					last_z = cand_z[pick];
+				}
+				if (pose1.R)
+					matd_destroy(pose1.R);
+				if (pose1.t)
+					matd_destroy(pose1.t);
+				if (pose2.R)
+					matd_destroy(pose2.R);
+				if (pose2.t)
+					matd_destroy(pose2.t);
 			}
 			apriltag_detections_destroy(detections);
 
@@ -271,13 +437,37 @@ void marker_worker_fn(device_manager *f)
 					head = f->pose.pos;
 					head_valid = f->pose.pos_valid;
 				}
+				vec3d sd = {};
+				if (acc_n > 1) {
+					const double n = acc_n;
+					sd.x = std::sqrt(std::max(
+						0.0, acc_sum2.x / n -
+							     (acc_sum.x / n) *
+								     (acc_sum.x / n)));
+					sd.y = std::sqrt(std::max(
+						0.0, acc_sum2.y / n -
+							     (acc_sum.y / n) *
+								     (acc_sum.y / n)));
+					sd.z = std::sqrt(std::max(
+						0.0, acc_sum2.z / n -
+							     (acc_sum.z / n) *
+								     (acc_sum.z / n)));
+				}
 				blog(LOG_INFO,
-				     "[obs-nyan-real-3dof] marker 6DoF rate %u/%u z=%.3f raw=(%+.3f,%+.3f,%+.3f) head=(%+.3f,%+.3f,%+.3f)m%s",
+				     "[obs-nyan-real-3dof] marker 6DoF rate %u/%u z=%.3f raw=(%+.3f,%+.3f,%+.3f) head=(%+.3f,%+.3f,%+.3f)m raw_sd=(%.1f,%.1f,%.1f)mm step_max=%.1fmm flips=%u%s",
 				     hits, frames, last_z, last_pos.x,
 				     last_pos.y, last_pos.z, head.x, head.y,
-				     head.z, head_valid ? "" : " (no anchor)");
+				     head.z, sd.x * 1000.0, sd.y * 1000.0,
+				     sd.z * 1000.0, max_step_m * 1000.0,
+				     flip_picks,
+				     head_valid ? "" : " (no anchor)");
 				frames = 0;
 				hits = 0;
+				acc_sum = {};
+				acc_sum2 = {};
+				acc_n = 0;
+				flip_picks = 0;
+				max_step_m = 0.0;
 			}
 		}
 		reader->Release();

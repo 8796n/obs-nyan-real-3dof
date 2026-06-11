@@ -89,13 +89,50 @@ bool publish_external_pose(device_manager *f, const quatd &device_q,
 	return true;
 }
 
+quatd device_pose_orientation(device_manager *f)
+{
+	std::lock_guard<std::mutex> lk(f->state_mutex);
+	return f->pose.q;
+}
+
 void publish_marker_position(device_manager *f, const vec3d &p_tag_world,
 			     uint32_t ts_us)
 {
 	std::lock_guard<std::mutex> lk(f->state_mutex);
-	f->tracker.on_marker_position(p_tag_world, ts_us);
+	const bool anchored_now =
+		f->tracker.on_marker_position(p_tag_world, ts_us);
 	f->pose = f->tracker.snapshot();
 	f->pose.connected = f->connected.load(std::memory_order_relaxed);
+	// With the tag at the real monitor, the anchor distance puts the
+	// virtual screen on the monitor plane, so leaning gives true-to-life
+	// perspective. Synced once per recenter; the dock follows the value.
+	if (anchored_now &&
+	    f->screen_dist_from_marker.load(std::memory_order_relaxed)) {
+		const double d = f->tracker.marker_anchor_distance_m();
+		if (d > 0.2) {
+			const double d_new = clampd(d, 0.2, 10.0);
+			const double d_old = clampd(
+				f->screen_distance_m.load(
+					std::memory_order_relaxed),
+				0.1, 10.0);
+			// The renderer keeps the screen's physical size, so a
+			// distance change alone would blow the apparent size
+			// up; scale the size factor with the distance ratio to
+			// keep the view as it looked before the recenter.
+			const double factor = clampd(
+				f->screen_size_factor.load(
+					std::memory_order_relaxed) *
+					d_new / d_old,
+				0.05, 4.0);
+			f->screen_distance_m.store(static_cast<float>(d_new),
+						   std::memory_order_relaxed);
+			f->screen_size_factor.store(static_cast<float>(factor),
+						    std::memory_order_relaxed);
+			blog(LOG_INFO,
+			     "[obs-nyan-real-3dof] screen distance from marker: %.2f m (size factor -> %.2f)",
+			     d_new, factor);
+		}
+	}
 }
 
 static void reset_tracker_for_model_locked(device_manager *f, model_id m)
@@ -327,6 +364,9 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 			      std::memory_order_relaxed);
 	f->cursor_fence.store(get_bool_setting(settings, "cursor_fence", false),
 			      std::memory_order_relaxed);
+	f->screen_dist_from_marker.store(
+		get_bool_setting(settings, "screen_dist_from_marker", false),
+		std::memory_order_relaxed);
 	f->debug_log.store(get_bool_setting(settings, "debug_log", false),
 			   std::memory_order_relaxed);
 	const long long sbs = obs_data_has_user_value(settings, "sbs_output")
@@ -438,6 +478,7 @@ void manager_reset_defaults(device_manager *f)
 	f->auto_projector.store(false, std::memory_order_relaxed);
 	f->auto_monitor.store(true, std::memory_order_relaxed);
 	f->cursor_fence.store(false, std::memory_order_relaxed);
+	f->screen_dist_from_marker.store(false, std::memory_order_relaxed);
 	f->debug_log.store(false, std::memory_order_relaxed);
 	f->sbs_output.store(0, std::memory_order_relaxed);
 
@@ -489,6 +530,9 @@ void manager_save_load(obs_data_t *save_data, bool saving, void *)
 				  g_device.auto_monitor.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "cursor_fence",
 				  g_device.cursor_fence.load(std::memory_order_relaxed));
+		obs_data_set_bool(obj, "screen_dist_from_marker",
+				  g_device.screen_dist_from_marker.load(
+					  std::memory_order_relaxed));
 		obs_data_set_bool(obj, "debug_log",
 				  g_device.debug_log.load(std::memory_order_relaxed));
 		obs_data_set_int(obj, "sbs_output",
