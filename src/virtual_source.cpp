@@ -5,6 +5,7 @@
 #include <obs-module.h>
 #include <graphics/graphics.h>
 #include <graphics/vec2.h>
+#include <graphics/vec3.h>
 #include <graphics/vec4.h>
 #include <util/platform.h>
 
@@ -30,6 +31,7 @@ struct nyan_real_virtual_source {
 	gs_eparam_t *p_screen_distance_m = nullptr;
 	gs_eparam_t *p_screen_half_size_m = nullptr;
 	gs_eparam_t *p_screen_curve = nullptr;
+	gs_eparam_t *p_eye_pos_m = nullptr;
 	gs_eparam_t *p_debug_tint = nullptr;
 	std::string target_name;
 	uint32_t output_width = 1920;
@@ -73,6 +75,7 @@ static void bind_warp_effect(gs_effect_t *effect, gs_eparam_t **p_image,
 			     gs_eparam_t **p_screen_distance_m,
 			     gs_eparam_t **p_screen_half_size_m,
 			     gs_eparam_t **p_screen_curve,
+			     gs_eparam_t **p_eye_pos_m,
 			     gs_eparam_t **p_debug_tint)
 {
 	if (!effect)
@@ -87,6 +90,7 @@ static void bind_warp_effect(gs_effect_t *effect, gs_eparam_t **p_image,
 	*p_screen_half_size_m =
 		gs_effect_get_param_by_name(effect, "screen_half_size_m");
 	*p_screen_curve = gs_effect_get_param_by_name(effect, "screen_curve");
+	*p_eye_pos_m = gs_effect_get_param_by_name(effect, "eye_pos_m");
 	*p_debug_tint = gs_effect_get_param_by_name(effect, "debug_tint");
 }
 
@@ -97,6 +101,7 @@ static gs_effect_t *create_warp_effect(gs_eparam_t **p_image,
 				       gs_eparam_t **p_screen_distance_m,
 				       gs_eparam_t **p_screen_half_size_m,
 				       gs_eparam_t **p_screen_curve,
+				       gs_eparam_t **p_eye_pos_m,
 				       gs_eparam_t **p_debug_tint)
 {
 	char *effect_path = obs_module_file("nyan-real-3dof.effect");
@@ -104,20 +109,22 @@ static gs_effect_t *create_warp_effect(gs_eparam_t **p_image,
 	bfree(effect_path);
 	bind_warp_effect(effect, p_image, p_pose_q, p_pose_valid, p_tan_half_fov,
 			 p_screen_distance_m, p_screen_half_size_m, p_screen_curve,
-			 p_debug_tint);
+			 p_eye_pos_m, p_debug_tint);
 	return effect;
 }
 
-static void set_warp_effect_parameters(gs_eparam_t *p_pose_q,
-				       gs_eparam_t *p_pose_valid,
-				       gs_eparam_t *p_tan_half_fov,
-				       gs_eparam_t *p_screen_distance_m,
-				       gs_eparam_t *p_screen_half_size_m,
-				       gs_eparam_t *p_screen_curve,
-				       gs_eparam_t *p_debug_tint,
-				       uint32_t view_w, uint32_t view_h,
-				       uint32_t screen_w, uint32_t screen_h,
-				       bool enable_pose)
+// Returns the predicted pose quaternion handed to the shader so the caller
+// can derive the per-eye world-space offsets from the same pose.
+static quatd set_warp_effect_parameters(gs_eparam_t *p_pose_q,
+					gs_eparam_t *p_pose_valid,
+					gs_eparam_t *p_tan_half_fov,
+					gs_eparam_t *p_screen_distance_m,
+					gs_eparam_t *p_screen_half_size_m,
+					gs_eparam_t *p_screen_curve,
+					gs_eparam_t *p_debug_tint,
+					uint32_t view_w, uint32_t view_h,
+					uint32_t screen_w, uint32_t screen_h,
+					bool enable_pose)
 {
 	pose_snapshot p;
 	{
@@ -163,8 +170,8 @@ static void set_warp_effect_parameters(gs_eparam_t *p_pose_q,
 	const float tan_x = tan_diag * view_aspect / diag_scale;
 	const float tan_y = tan_diag / diag_scale;
 	const float screen_distance_m = static_cast<float>(
-		clampd(g_device.screen_distance_m.load(std::memory_order_relaxed), 1.0,
-		       10.0));
+		clampd(g_device.screen_distance_m.load(std::memory_order_relaxed),
+		       MIN_SCREEN_DISTANCE_M, MAX_SCREEN_DISTANCE_M));
 	const float screen_size_factor = static_cast<float>(
 		clampd(g_device.screen_size_factor.load(std::memory_order_relaxed), 0.25,
 		       4.0));
@@ -186,6 +193,7 @@ static void set_warp_effect_parameters(gs_eparam_t *p_pose_q,
 			    g_device.debug_log.load(std::memory_order_relaxed)
 				    ? (p.connected ? 0.25f : 0.6f)
 				    : 0.0f);
+	return q;
 }
 
 struct recursion_check_data {
@@ -307,6 +315,7 @@ static void *virtual_source_create(obs_data_t *settings, obs_source_t *context)
 				       &s->p_screen_distance_m,
 				       &s->p_screen_half_size_m,
 				       &s->p_screen_curve,
+				       &s->p_eye_pos_m,
 				       &s->p_debug_tint);
 	obs_leave_graphics();
 
@@ -486,7 +495,7 @@ static bool virtual_source_capture_target(nyan_real_virtual_source *s, uint32_t 
 // well below). Manual ON covers half-SBS, which is not detectable from the
 // mode; the EDID-gated glasses display detection keeps ultrawide desktop
 // monitors out of the auto path.
-static bool sbs_output_active(uint32_t output_w, uint32_t output_h)
+bool sbs_output_active(uint32_t output_w, uint32_t output_h)
 {
 	const int mode = g_device.sbs_output.load(std::memory_order_relaxed);
 	if (mode == 1)
@@ -506,12 +515,28 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 
 	// In SBS the per-eye view keeps the per-eye aspect, so the FOV math
 	// uses the half width.
-	set_warp_effect_parameters(s->p_pose_q, s->p_pose_valid, s->p_tan_half_fov,
-				   s->p_screen_distance_m,
-				   s->p_screen_half_size_m, s->p_screen_curve,
-				   s->p_debug_tint,
-				   eye_w, s->output_height, source_w,
-				   source_h, hid_device_ready(&g_device));
+	const quatd q = set_warp_effect_parameters(
+		s->p_pose_q, s->p_pose_valid, s->p_tan_half_fov,
+		s->p_screen_distance_m, s->p_screen_half_size_m, s->p_screen_curve,
+		s->p_debug_tint, eye_w, s->output_height, source_w, source_h,
+		hid_device_ready(&g_device));
+
+	// Per-eye parallax: each eye renders from its own world position
+	// (the head-frame ±IPD/2 lateral offset rotated by the pose). The
+	// screen then converges at screen_distance_m instead of optical
+	// infinity, and gets closer/larger as that distance shrinks. Mono
+	// output keeps the single centered eye.
+	const double half_ipd_m =
+		sbs ? clampd(g_device.ipd_mm.load(std::memory_order_relaxed),
+			     MIN_IPD_MM, MAX_IPD_MM) *
+			      0.0005
+		    : 0.0;
+	const vec3d eye_right = rotate_vector(q, {half_ipd_m, 0.0, 0.0});
+	struct vec3 eye_pos;
+	vec3_set(&eye_pos, static_cast<float>(-eye_right.x),
+		 static_cast<float>(-eye_right.y),
+		 static_cast<float>(-eye_right.z));
+	gs_effect_set_vec3(s->p_eye_pos_m, &eye_pos); // left eye (or mono center)
 
 	const bool previous_srgb = gs_set_linear_srgb(true);
 	const bool linear_srgb = gs_get_linear_srgb();
@@ -528,6 +553,13 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 		gs_technique_begin_pass(tech, i);
 		gs_draw_sprite(tex, 0, eye_w, s->output_height);
 		if (sbs) {
+			// Effect parameters set between draws are flushed by
+			// device_draw via gs_effect_update_params, so the
+			// right half picks up the right-eye origin.
+			vec3_set(&eye_pos, static_cast<float>(eye_right.x),
+				 static_cast<float>(eye_right.y),
+				 static_cast<float>(eye_right.z));
+			gs_effect_set_vec3(s->p_eye_pos_m, &eye_pos);
 			gs_matrix_push();
 			gs_matrix_translate3f(static_cast<float>(eye_w), 0.0f,
 					      0.0f);
