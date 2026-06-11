@@ -14,6 +14,8 @@ let muteLeg = null; // zero-gain path that keeps the tap pulled by the graph
 let localGain = null; // fallback to the speakers while OBS is unreachable
 const hooked = new WeakSet();
 let silentBuffers = 0;
+let posTimer = null;
+let lastCx = Number.NaN;
 
 function setLocalPlayback(enabled) {
   if (!localGain) return;
@@ -96,9 +98,31 @@ function attachScriptProcessor() {
   sp.connect(muteLeg);
 }
 
+// chrome.windows.onBoundsChanged only fires when a move is committed
+// (mouse released), so the service worker alone cannot follow a live drag.
+// The page, however, sees window.screenX update during the drag; poll it
+// here and report the window-center x (DIP, same space as
+// chrome.system.display) so the audio pans while the window moves.
+function startPositionWatch() {
+  if (posTimer) return;
+  posTimer = setInterval(() => {
+    const cx = window.screenX + window.outerWidth / 2;
+    if (!(Math.abs(cx - lastCx) >= 8)) return;
+    lastCx = cx;
+    const p = ensurePort();
+    if (!p) return;
+    try {
+      p.postMessage({ type: "pos", cx });
+    } catch (e) {
+      port = null;
+    }
+  }, 200);
+}
+
 function ensureAudio() {
   if (ctx) return;
   ctx = new AudioContext();
+  startPositionWatch();
   mixBus = ctx.createGain();
   // Taps only run while the graph pulls them toward the destination; a
   // zero-gain leg keeps them pulled without making the tab audible.

@@ -541,6 +541,14 @@ Audio Wall は localhost WebSocket サーバー（`ws_audio_server.cpp`、ポー
 - 拡張はローカルフォールバックを持つ: WS 未接続の間は content script の
   グラフが destination へも出力し（ゲイン 1）、接続が立つとゲイン 0 に
   ランプする。OBS 不在でブラウザが無音になることはない
+- 窓位置の追従は 3 系統: `windows.onBoundsChanged` は**移動確定時のみ**
+  発火する Chrome 仕様で、レンダラーの `window.screenX` もドラッグ中は
+  更新されない（実機確認）。ドラッグ中の追従はサービスワーカーが
+  `chrome.windows.get` を 200ms でポーリングして補完する（HWND 矩形は
+  移動中も動いており、Chromium はモーダル移動ループ中も UI スレッドの
+  タスクを回すため API では生の位置が読める）。content script の
+  `window.screenX` 200ms ポーリング（`pos` メッセージ）は他プラットフォーム
+  向けの補助として残置。いずれも 8px 以上動いたときだけ送信
 - WS サーバーは RFC 6455 のサーバー側最小実装（ハンドシェイクの SHA-1 は
   wincrypt、Base64 は自前、マスク必須・4MB フレーム上限・ping/pong 対応）。
   依存ライブラリなし

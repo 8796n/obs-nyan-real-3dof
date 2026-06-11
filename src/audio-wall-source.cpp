@@ -279,6 +279,9 @@ struct audio_wall_source {
 	// Last mismatched extension protocol version, -1 = none; shown in the
 	// source properties so the user sees it without opening the log.
 	std::atomic<long long> ws_proto_mismatch{-1};
+	// The capture list shown in the properties changed; tick tells OBS to
+	// rebuild an open properties view (no-op while it is closed).
+	std::atomic<bool> props_dirty{false};
 	bool active_children = false;
 
 	// Browser exes currently streaming over WS; the poll thread excludes
@@ -673,6 +676,8 @@ void wall_ws_text(audio_wall_source *wall, uint64_t conn, obs_data_t *msg)
 			release_ws_stream_locked(wall, it->second);
 			wall->ws_streams.erase(it);
 			rebuild_ws_exes_locked(wall);
+			wall->props_dirty.store(true,
+						std::memory_order_relaxed);
 		}
 		return;
 	}
@@ -682,7 +687,9 @@ void wall_ws_text(audio_wall_source *wall, uint64_t conn, obs_data_t *msg)
 	std::lock_guard<std::mutex> lk(wall->children_mutex);
 	const long long proto = obs_data_get_int(msg, "v");
 	if (proto != WS_PROTOCOL_VERSION) {
-		wall->ws_proto_mismatch.store(proto, std::memory_order_relaxed);
+		if (wall->ws_proto_mismatch.exchange(
+			    proto, std::memory_order_relaxed) != proto)
+			wall->props_dirty.store(true, std::memory_order_relaxed);
 		if (!wall->ws_warned_conns.count(conn)) {
 			wall->ws_warned_conns.insert(conn);
 			blog(LOG_WARNING,
@@ -690,14 +697,18 @@ void wall_ws_text(audio_wall_source *wall, uint64_t conn, obs_data_t *msg)
 			     proto, WS_PROTOCOL_VERSION);
 		}
 	} else {
-		wall->ws_proto_mismatch.store(-1, std::memory_order_relaxed);
+		if (wall->ws_proto_mismatch.exchange(
+			    -1, std::memory_order_relaxed) != -1)
+			wall->props_dirty.store(true, std::memory_order_relaxed);
 	}
 	ws_stream &st = wall->ws_streams[key];
 	st.norm_x = static_cast<float>(
 		clampd(obs_data_get_double(msg, "norm_x"), -0.5, 0.5));
 	const char *label = obs_data_get_string(msg, "label");
-	if (label && *label)
+	if (label && *label && st.label != label) {
 		st.label = label;
+		wall->props_dirty.store(true, std::memory_order_relaxed);
+	}
 	const long long sr = obs_data_get_int(msg, "sample_rate");
 	if (sr >= 8000 && sr <= 192000)
 		st.sample_rate = static_cast<uint32_t>(sr);
@@ -735,6 +746,8 @@ void wall_ws_text(audio_wall_source *wall, uint64_t conn, obs_data_t *msg)
 			     "[obs-nyan-real-3dof] audio wall: ws stream '%s' (norm x %.2f, %u Hz, %dch)",
 			     st.label.c_str(), st.norm_x, st.sample_rate,
 			     st.channels);
+			wall->props_dirty.store(true,
+						std::memory_order_relaxed);
 		}
 	}
 	update_spatial_filter(wall, st.filter, st.norm_x);
@@ -790,6 +803,8 @@ void wall_ws_closed(audio_wall_source *wall, uint64_t conn)
 		if ((it->first >> 32) == conn) {
 			release_ws_stream_locked(wall, it->second);
 			it = wall->ws_streams.erase(it);
+			wall->props_dirty.store(true,
+						std::memory_order_relaxed);
 		} else {
 			++it;
 		}
@@ -846,6 +861,7 @@ void wall_reconcile(audio_wall_source *wall)
 		blog(LOG_INFO, "[obs-nyan-real-3dof] audio wall: released '%s'",
 		     (*it)->exe.c_str());
 		it = wall->children.erase(it);
+		wall->props_dirty.store(true, std::memory_order_relaxed);
 	}
 
 	for (const desired_app &app : want) {
@@ -898,6 +914,7 @@ void wall_reconcile(audio_wall_source *wall)
 		     "[obs-nyan-real-3dof] audio wall: capturing '%s' (norm x %.2f)",
 		     app.exe.c_str(), app.norm_x);
 		wall->children.push_back(std::move(child));
+		wall->props_dirty.store(true, std::memory_order_relaxed);
 	}
 }
 
@@ -1080,6 +1097,11 @@ void wall_tick(void *data, float)
 {
 	auto *wall = static_cast<audio_wall_source *>(data);
 	wall_reconcile(wall);
+	// Refresh an open properties dialog when the capture list changed
+	// (no-op while it is closed). Change-gated so editing the exclude
+	// field is not disturbed by periodic rebuilds.
+	if (wall->props_dirty.exchange(false, std::memory_order_relaxed))
+		obs_source_update_properties(wall->context);
 	// Bearings depend on the live screen geometry and the Display Wall
 	// layout; refresh the filters when either moves.
 	{
@@ -1128,8 +1150,10 @@ void wall_tick(void *data, float)
 			++it;
 		}
 	}
-	if (removed)
+	if (removed) {
 		rebuild_ws_exes_locked(wall);
+		wall->props_dirty.store(true, std::memory_order_relaxed);
+	}
 	wall_add_active_children(wall);
 }
 
