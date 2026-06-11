@@ -20,6 +20,7 @@ struct device_manager {
 	pose_snapshot pose;
 
 	std::thread worker;
+	std::thread detect_worker;
 	std::atomic<bool> stop{false};
 	std::atomic<uint32_t> reconnect_epoch{0};
 	std::atomic<bool> connected{false};
@@ -80,10 +81,10 @@ bool publish_sensor_samples(device_manager *f, const imu_sample *imu,
 			    const mag_sample *mag);
 bool publish_external_pose(device_manager *f, const quatd &device_q,
 			   uint32_t ts_us);
-void refresh_detected_model(device_manager *f, uint64_t &last_detect_ns);
 void maybe_log_sensor_rate(device_manager *f, rate_log_state &st,
 			   const char *transport);
 void worker_fn(device_manager *f);
+void detect_worker_fn(device_manager *f);
 
 void manager_apply_settings(device_manager *f, obs_data_t *settings);
 void manager_recenter(device_manager *f);

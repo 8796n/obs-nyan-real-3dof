@@ -315,7 +315,13 @@ bool hid_read_report(HANDLE h, USHORT input_len, std::vector<uint8_t> &data,
 
 HANDLE open_hid_path_rw(const std::wstring &path)
 {
-	return CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
-			   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-			   FILE_FLAG_OVERLAPPED, nullptr);
+	HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+			       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+			       OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+	// The default HID input queue is 32 reports, only 32 ms at the Nreal
+	// Light's 1000 Hz rate, so any scheduling stall on the reader thread
+	// drops samples. Failure is non-fatal (some drivers refuse).
+	if (h != INVALID_HANDLE_VALUE)
+		HidD_SetNumInputBuffers(h, 128);
+	return h;
 }

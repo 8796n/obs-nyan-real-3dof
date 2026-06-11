@@ -9,15 +9,10 @@
 
 struct device_manager;
 
-void run_one_bridge_tcp_session(device_manager *f, uint32_t &seen_epoch,
-				uint64_t &last_detect_ns);
-void run_air_hid_session(device_manager *f, uint32_t &seen_epoch,
-			 uint64_t &last_detect_ns);
-void run_rayneo_hid_session(device_manager *f, uint32_t &seen_epoch,
-			    uint64_t &last_detect_ns);
-void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch,
-			    uint64_t &last_detect_ns);
-void run_rokid_hid_session(device_manager *f, uint32_t &seen_epoch,
-			   uint64_t &last_detect_ns);
-void run_viture_hid_session(device_manager *f, uint32_t &seen_epoch,
-			    uint64_t &last_detect_ns);
+void run_one_bridge_tcp_session(device_manager *f, uint32_t &seen_epoch);
+void run_air_hid_session(device_manager *f, uint32_t &seen_epoch);
+void run_rayneo_hid_session(device_manager *f, uint32_t &seen_epoch);
+void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch);
+void run_rokid_hid_session(device_manager *f, uint32_t &seen_epoch);
+void run_viture_hid_session(device_manager *f, uint32_t &seen_epoch);
+void run_nreal_hid_session(device_manager *f, uint32_t &seen_epoch);

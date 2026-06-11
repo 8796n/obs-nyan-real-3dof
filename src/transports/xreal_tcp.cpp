@@ -230,8 +230,7 @@ static bool consume_stream_bytes(device_manager *f, std::vector<uint8_t> &stash,
 	}
 }
 
-void run_one_bridge_tcp_session(device_manager *f, uint32_t &seen_epoch,
-				       uint64_t &last_detect_ns)
+void run_one_bridge_tcp_session(device_manager *f, uint32_t &seen_epoch)
 {
 	winsock_scope ws;
 	if (!ws.ok()) {
@@ -277,7 +276,6 @@ void run_one_bridge_tcp_session(device_manager *f, uint32_t &seen_epoch,
 	while (!f->stop.load(std::memory_order_relaxed) &&
 	       f->connect_enabled.load(std::memory_order_relaxed) &&
 	       seen_epoch == f->reconnect_epoch.load(std::memory_order_relaxed)) {
-		refresh_detected_model(f, last_detect_ns);
 		if (!hid_device_ready(f) ||
 		    detected_transport_for(f) != imu_transport::one_bridge_tcp)
 			break;

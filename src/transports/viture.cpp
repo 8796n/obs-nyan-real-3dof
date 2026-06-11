@@ -158,8 +158,7 @@ static bool open_viture_hid_stream(std::vector<viture_iface> &ifaces,
 	return false;
 }
 
-void run_viture_hid_session(device_manager *f, uint32_t &seen_epoch,
-				   uint64_t &last_detect_ns)
+void run_viture_hid_session(device_manager *f, uint32_t &seen_epoch)
 {
 	std::vector<viture_iface> ifaces;
 	size_t imu_index = 0;
@@ -190,7 +189,6 @@ void run_viture_hid_session(device_manager *f, uint32_t &seen_epoch,
 	while (!f->stop.load(std::memory_order_relaxed) &&
 	       f->connect_enabled.load(std::memory_order_relaxed) &&
 	       seen_epoch == f->reconnect_epoch.load(std::memory_order_relaxed)) {
-		refresh_detected_model(f, last_detect_ns);
 		if (!hid_device_ready(f) ||
 		    detected_transport_for(f) != imu_transport::viture_hid)
 			break;
