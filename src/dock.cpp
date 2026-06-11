@@ -377,6 +377,11 @@ public:
 		eye_button = new QPushButton(device_group);
 		eye_button->setToolTip(obs_module_text("dock.eye_tooltip"));
 		device_form->addRow(QString(), eye_button);
+		dist_marker_box = new QCheckBox(
+			obs_module_text("screen_dist_marker"), device_group);
+		dist_marker_box->setToolTip(
+			obs_module_text("screen_dist_marker_tooltip"));
+		device_form->addRow(QString(), dist_marker_box);
 		sbs_combo = new NoWheelComboBox(device_group);
 		sbs_combo->addItem(obs_module_text("sbs_output.auto"), 0);
 		sbs_combo->addItem(obs_module_text("sbs_output.on"), 1);
@@ -422,7 +427,9 @@ public:
 		distance_spin->setDecimals(1);
 		distance_spin->setSingleStep(0.1);
 		size_spin = new NoWheelDoubleSpinBox(screen_group);
-		size_spin->setRange(0.25, 4.0);
+		// Down to 0.05: the marker distance sync scales the factor
+		// with the distance ratio, and a 4 m -> 0.5 m move needs 1/8.
+		size_spin->setRange(0.05, 4.0);
 		size_spin->setDecimals(2);
 		size_spin->setSingleStep(0.05);
 		curve_spin = new NoWheelDoubleSpinBox(screen_group);
@@ -576,6 +583,12 @@ public:
 				 this, [](double value) {
 					 g_device.prediction_ms.store(static_cast<float>(value),
 								      std::memory_order_relaxed);
+				 });
+		QObject::connect(dist_marker_box, &QCheckBox::toggled, this,
+				 [](bool checked) {
+					 g_device.screen_dist_from_marker.store(
+						 checked,
+						 std::memory_order_relaxed);
 				 });
 		QObject::connect(fov_auto_box, &QCheckBox::toggled, this, [this](bool checked) {
 			g_device.fov_auto.store(checked, std::memory_order_relaxed);
@@ -745,7 +758,7 @@ private:
 			       MIN_SCREEN_DISTANCE_M, MAX_SCREEN_DISTANCE_M);
 		const double size_factor =
 			clampd(g_device.screen_size_factor.load(std::memory_order_relaxed),
-			       0.25, 4.0);
+			       0.05, 4.0);
 		const double screen_curve =
 			clampd(g_device.screen_curve.load(std::memory_order_relaxed), 0.0,
 			       MAX_SCREEN_CURVE);
@@ -798,6 +811,8 @@ private:
 						   tr.display_mode_count > 0);
 			device_form->setRowVisible(eye_label, tr.eye_camera);
 			device_form->setRowVisible(eye_button, tr.eye_camera);
+			device_form->setRowVisible(dist_marker_box,
+						   tr.eye_camera);
 		}
 		// Eye camera state: adjustable while the session has the One's
 		// control HID open and the Eye is attached.
@@ -1014,6 +1029,12 @@ private:
 			QSignalBlocker block(fov_auto_box);
 			fov_auto_box->setChecked(fov_auto);
 		}
+		{
+			QSignalBlocker block(dist_marker_box);
+			dist_marker_box->setChecked(
+				g_device.screen_dist_from_marker.load(
+					std::memory_order_relaxed));
+		}
 		set_double_enabled(fov_spin, fov_slider, !fov_auto);
 		set_double_control(prediction_spin, prediction_slider,
 				   PREDICTION_SLIDER_SCALE,
@@ -1067,6 +1088,7 @@ private:
 	QDoubleSpinBox *prediction_spin = nullptr;
 	QSlider *prediction_slider = nullptr;
 	QCheckBox *fov_auto_box = nullptr;
+	QCheckBox *dist_marker_box = nullptr;
 	QDoubleSpinBox *fov_spin = nullptr;
 	QSlider *fov_slider = nullptr;
 	QDoubleSpinBox *distance_spin = nullptr;
