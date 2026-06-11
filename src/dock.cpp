@@ -845,6 +845,12 @@ private:
 		const int virtual_count =
 			g_device.virtual_source_count.load(std::memory_order_relaxed);
 		virtual_label->setText(QString::number(virtual_count));
+		// The auto-fullscreen latch is per glasses connection, but a
+		// virtual screen source appearing (added to the scene while
+		// the glasses are already connected) should fire it too.
+		if (last_virtual_count == 0 && virtual_count > 0)
+			auto_projector_opened = false;
+		last_virtual_count = virtual_count;
 
 		nyan_real_glasses_display_info glasses;
 		const bool glasses_display_present =
@@ -1031,8 +1037,10 @@ private:
 	QCheckBox *auto_projector_box = nullptr;
 	QCheckBox *auto_monitor_box = nullptr;
 	QCheckBox *cursor_fence_box = nullptr;
-	// Auto-open latch: one projector per glasses-display connection.
+	// Auto-open latch: one projector per glasses-display connection,
+	// re-armed when a virtual screen source first appears.
 	bool auto_projector_opened = false;
+	int last_virtual_count = -1;
 	// Monitoring-device latch: one auto-switch per detected connection.
 	bool auto_monitor_applied = false;
 	// Projectors seen on the glasses screen; closed on display removal.

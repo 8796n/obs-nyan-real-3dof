@@ -19,6 +19,66 @@
 #include "math_util.h"
 #include "nyan_types.h"
 
+// GPU stage probes (debug logging only): D3D11 timestamp queries around the
+// capture and warp draws. gs_timer_get_data busy-waits until the GPU passes
+// the query, so results are read two frames later (parity double buffer)
+// when they are guaranteed complete and the read returns instantly.
+constexpr int GPU_PROBE_VIEWS = 6; // preview/program/projectors per frame
+
+struct gpu_probe {
+	gs_timer_t *timer = nullptr;
+	gs_timer_range_t *range = nullptr;
+	bool pending = false;
+};
+
+static bool probe_begin(gpu_probe &p)
+{
+	if (!p.timer)
+		p.timer = gs_timer_create();
+	if (!p.range)
+		p.range = gs_timer_range_create();
+	if (!p.timer || !p.range)
+		return false;
+	gs_timer_range_begin(p.range);
+	gs_timer_begin(p.timer);
+	return true;
+}
+
+static void probe_end(gpu_probe &p)
+{
+	gs_timer_end(p.timer);
+	gs_timer_range_end(p.range);
+	p.pending = true;
+}
+
+static bool probe_read_ms(gpu_probe &p, double *ms)
+{
+	if (!p.pending)
+		return false;
+	p.pending = false;
+	uint64_t ticks = 0;
+	uint64_t freq = 0;
+	bool disjoint = false;
+	if (!gs_timer_get_data(p.timer, &ticks))
+		return false;
+	if (!gs_timer_range_get_data(p.range, &disjoint, &freq) || disjoint ||
+	    !freq)
+		return false;
+	*ms = static_cast<double>(ticks) * 1000.0 / static_cast<double>(freq);
+	return true;
+}
+
+static void probe_free(gpu_probe &p)
+{
+	if (p.timer)
+		gs_timer_destroy(p.timer);
+	if (p.range)
+		gs_timer_range_destroy(p.range);
+	p.timer = nullptr;
+	p.range = nullptr;
+	p.pending = false;
+}
+
 struct nyan_real_virtual_source {
 	obs_source_t *context = nullptr;
 	obs_source_t *target = nullptr;
@@ -45,6 +105,17 @@ struct nyan_real_virtual_source {
 	bool captured_this_frame = false;
 	float target_retry_timer_s = 0.0f;
 	uint64_t last_render_log_ns = 0;
+	// GPU profiling state (graphics thread only, active under debug log).
+	gpu_probe probe_capture[2];
+	gpu_probe probe_warp[2][GPU_PROBE_VIEWS];
+	int probe_parity = 0;
+	int warp_view_count = 0;
+	bool probes_read_this_frame = false;
+	double acc_capture_ms = 0.0;
+	double acc_warp_ms = 0.0;
+	uint32_t acc_frames = 0;
+	uint32_t acc_views = 0;
+	uint64_t last_gpu_log_ns = 0;
 };
 
 static quatd predict_pose(const pose_snapshot &p, float prediction_ms)
@@ -359,6 +430,11 @@ static void virtual_source_destroy(void *data)
 		gs_texrender_destroy(s->texrender);
 	if (s->effect)
 		gs_effect_destroy(s->effect);
+	for (int parity = 0; parity < 2; parity++) {
+		probe_free(s->probe_capture[parity]);
+		for (gpu_probe &p : s->probe_warp[parity])
+			probe_free(p);
+	}
 	obs_leave_graphics();
 	g_device.virtual_source_count.fetch_sub(1, std::memory_order_relaxed);
 	delete s;
@@ -576,12 +652,51 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 	gs_set_linear_srgb(previous_srgb);
 }
 
+// Read the probes written two frames ago and emit a once-a-second summary.
+// Runs inside the graphics context on the first view render of the frame.
+static void gpu_probes_collect(nyan_real_virtual_source *s)
+{
+	double ms = 0.0;
+	if (probe_read_ms(s->probe_capture[s->probe_parity], &ms)) {
+		s->acc_capture_ms += ms;
+		s->acc_frames++;
+	}
+	for (gpu_probe &p : s->probe_warp[s->probe_parity]) {
+		if (probe_read_ms(p, &ms)) {
+			s->acc_warp_ms += ms;
+			s->acc_views++;
+		}
+	}
+
+	const uint64_t now = os_gettime_ns();
+	if (now - s->last_gpu_log_ns < 1000000000ULL || !s->acc_frames)
+		return;
+	s->last_gpu_log_ns = now;
+	const double frames = static_cast<double>(s->acc_frames);
+	blog(LOG_INFO,
+	     "[obs-nyan-real-3dof] GPU: capture %.2f ms/frame, warp %.2f ms/frame (%.1f views, %.2f ms/view), output %ux%u, %u frames",
+	     s->acc_capture_ms / frames, s->acc_warp_ms / frames,
+	     static_cast<double>(s->acc_views) / frames,
+	     s->acc_views ? s->acc_warp_ms / s->acc_views : 0.0,
+	     s->output_width, s->output_height, s->acc_frames);
+	s->acc_capture_ms = 0.0;
+	s->acc_warp_ms = 0.0;
+	s->acc_frames = 0;
+	s->acc_views = 0;
+}
+
 static void virtual_source_render(void *data, gs_effect_t *)
 {
 	auto *s = static_cast<nyan_real_virtual_source *>(data);
 	if (!s->effect || !s->p_image || !s->target || s->target_recursion_blocked ||
 	    obs_source_removed(s->target))
 		return;
+
+	const bool gpu_debug = g_device.debug_log.load(std::memory_order_relaxed);
+	if (gpu_debug && !s->probes_read_this_frame) {
+		s->probes_read_this_frame = true;
+		gpu_probes_collect(s);
+	}
 
 	const uint32_t source_w = obs_source_get_width(s->target);
 	const uint32_t source_h = obs_source_get_height(s->target);
@@ -593,7 +708,14 @@ static void virtual_source_render(void *data, gs_effect_t *)
 	const enum gs_color_space space =
 		obs_source_get_color_space(s->target, 1, pref);
 	if (!s->captured_this_frame) {
-		if (!virtual_source_capture_target(s, source_w, source_h, space)) {
+		gpu_probe &cp = s->probe_capture[s->probe_parity];
+		const bool probing = gpu_debug && probe_begin(cp);
+		const bool captured =
+			virtual_source_capture_target(s, source_w, source_h,
+						      space);
+		if (probing)
+			probe_end(cp);
+		if (!captured) {
 			const uint64_t now = os_gettime_ns();
 			if (now - s->last_render_log_ns > 2000000000ULL) {
 				s->last_render_log_ns = now;
@@ -620,7 +742,16 @@ static void virtual_source_render(void *data, gs_effect_t *)
 
 	gs_blend_state_push();
 	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+	gpu_probe *wp = gpu_debug && s->warp_view_count < GPU_PROBE_VIEWS
+				? &s->probe_warp[s->probe_parity]
+						[s->warp_view_count]
+				: nullptr;
+	if (wp && !probe_begin(*wp))
+		wp = nullptr;
 	virtual_source_draw_warp(s, tex, source_w, source_h);
+	if (wp)
+		probe_end(*wp);
+	s->warp_view_count++;
 	gs_blend_state_pop();
 }
 
@@ -630,6 +761,11 @@ static void virtual_source_tick(void *data, float seconds)
 	if (!s)
 		return;
 	s->captured_this_frame = false;
+	// GPU probes: this frame writes the other parity slot; what that slot
+	// held (two frames old) is read at the first view render.
+	s->probe_parity ^= 1;
+	s->warp_view_count = 0;
+	s->probes_read_this_frame = false;
 
 	// Render resolution is automatic: the glasses display's actual mode
 	// when present, otherwise the HID-detected device's native resolution.
