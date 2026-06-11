@@ -372,6 +372,11 @@ public:
 			obs_module_text("displaymode_tooltip"));
 		device_form->addRow(obs_module_text("displaymode"),
 				    display_mode_combo);
+		eye_label = new QLabel(device_group);
+		device_form->addRow(obs_module_text("dock.eye"), eye_label);
+		eye_button = new QPushButton(device_group);
+		eye_button->setToolTip(obs_module_text("dock.eye_tooltip"));
+		device_form->addRow(QString(), eye_button);
 		sbs_combo = new NoWheelComboBox(device_group);
 		sbs_combo->addItem(obs_module_text("sbs_output.auto"), 0);
 		sbs_combo->addItem(obs_module_text("sbs_output.on"), 1);
@@ -507,6 +512,15 @@ public:
 					 g_device.sbs_output.store(
 						 sbs_combo->itemData(index).toInt(),
 						 std::memory_order_relaxed);
+				 });
+		QObject::connect(eye_button, &QPushButton::clicked, this,
+				 [this]() {
+					 const int uvc = g_device.eye_uvc.load(
+						 std::memory_order_relaxed);
+					 g_device.eye_request.store(
+						 uvc == 1 ? 0 : 1,
+						 std::memory_order_relaxed);
+					 refresh();
 				 });
 		QObject::connect(ip_edit, &QLineEdit::editingFinished, this, [this]() {
 			manager_set_network(&g_device, ip_edit->text().trimmed().toStdString(),
@@ -782,6 +796,36 @@ private:
 			}
 			device_form->setRowVisible(display_mode_combo,
 						   tr.display_mode_count > 0);
+			device_form->setRowVisible(eye_label, tr.eye_camera);
+			device_form->setRowVisible(eye_button, tr.eye_camera);
+		}
+		// Eye camera state: adjustable while the session has the One's
+		// control HID open and the Eye is attached.
+		{
+			const int eye_present = g_device.eye_present.load(
+				std::memory_order_relaxed);
+			const int eye_uvc =
+				g_device.eye_uvc.load(std::memory_order_relaxed);
+			const bool eye_pending =
+				g_device.eye_request.load(
+					std::memory_order_relaxed) >= 0;
+			const char *eye_text;
+			if (eye_pending)
+				eye_text = obs_module_text("dock.eye.switching");
+			else if (eye_present < 0)
+				eye_text = obs_module_text("dock.eye.unknown");
+			else if (eye_present == 0)
+				eye_text = obs_module_text("dock.eye.absent");
+			else
+				eye_text = obs_module_text(
+					eye_uvc == 1 ? "dock.eye.uvc_on"
+						     : "dock.eye.uvc_off");
+			eye_label->setText(eye_text);
+			eye_button->setText(obs_module_text(
+				eye_uvc == 1 ? "dock.eye.disable"
+					     : "dock.eye.enable"));
+			eye_button->setEnabled(eye_present == 1 &&
+					       eye_uvc >= 0 && !eye_pending);
 		}
 		// The display-mode row is adjustable while the session has the
 		// device's command channel open (-1 = unknown/unavailable).
@@ -1016,6 +1060,8 @@ private:
 	QWidget *brightness_row = nullptr;
 	QCheckBox *autobright_box = nullptr;
 	QComboBox *display_mode_combo = nullptr;
+	QLabel *eye_label = nullptr;
+	QPushButton *eye_button = nullptr;
 	QComboBox *sbs_combo = nullptr;
 	int last_transport = -1; // imu_transport value last applied to row visibility
 	QDoubleSpinBox *prediction_spin = nullptr;

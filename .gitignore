@@ -6,6 +6,7 @@ deps/gen/
 deps/obs-studio/
 deps/obslib/
 deps/qt/
+deps/apriltag/
 CMakeUserPresets.json
 *.user
 *.log

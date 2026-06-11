@@ -56,6 +56,16 @@ public:
 		latest_omega_ = {};
 		imu_count_ = 0;
 		mag_count_ = 0;
+		pos_ = {};
+		pos_valid_ = false;
+		marker_origin_ = {};
+		marker_anchor_pending_ = true;
+		marker_last_ts_us_ = 0;
+		marker_warmup_sum_ = {};
+		marker_warmup_n_ = 0;
+		marker_outlier_n_ = 0;
+		for (one_euro &f : marker_euro_)
+			f.reset();
 		update_mount();
 	}
 
@@ -90,6 +100,96 @@ public:
 	{
 		zq_ = quat_inverse(q_);
 		reset_mag_yaw_correction();
+		// The marker origin follows the recenter: the current head
+		// position becomes the new world origin and the next marker
+		// samples re-anchor the tag-frame reference.
+		marker_anchor_pending_ = true;
+		marker_warmup_sum_ = {};
+		marker_warmup_n_ = 0;
+		marker_outlier_n_ = 0;
+		for (one_euro &f : marker_euro_)
+			f.reset();
+		pos_ = {};
+	}
+
+	// --- Marker-6DoF position (the tag is a ruler, not an anchor) -------
+	// p_tag is the camera position in the tag frame, already mapped to the
+	// world axis convention (X right, Y up, Z back). The first sample
+	// after a recenter records the origin; afterwards the smoothed offset
+	// from that origin is the head position. While the tag is lost the
+	// position simply holds (3DoF degradation).
+	void on_marker_position(const vec3d &p_tag_cam, uint32_t ts_us)
+	{
+		// Lever-arm compensation: the camera sits ahead of the head's
+		// rotation center, so pure head rotation translates the camera.
+		// That rotation is already rendered by the 3DoF path; remove it
+		// from the position measurement or it double-counts as wobble.
+		// The offset is the camera position in the recentered head
+		// frame (X right, Y up, Z back; meters).
+		const quatd qrel = quat_normalize(quat_multiply(zq_, q_));
+		const vec3d arm = rotate_vector(qrel, MARKER_CAM_OFFSET);
+		const vec3d p_tag = {p_tag_cam.x - arm.x, p_tag_cam.y - arm.y,
+				     p_tag_cam.z - arm.z};
+		if (marker_anchor_pending_) {
+			// Average a short consistent burst before anchoring so
+			// a stray detection cannot become the origin.
+			if (marker_warmup_n_ > 0) {
+				const vec3d m = {
+					marker_warmup_sum_.x / marker_warmup_n_,
+					marker_warmup_sum_.y / marker_warmup_n_,
+					marker_warmup_sum_.z / marker_warmup_n_};
+				const double d2 =
+					(p_tag.x - m.x) * (p_tag.x - m.x) +
+					(p_tag.y - m.y) * (p_tag.y - m.y) +
+					(p_tag.z - m.z) * (p_tag.z - m.z);
+				if (d2 > 0.05 * 0.05) {
+					marker_warmup_sum_ = {};
+					marker_warmup_n_ = 0;
+				}
+			}
+			marker_warmup_sum_.x += p_tag.x;
+			marker_warmup_sum_.y += p_tag.y;
+			marker_warmup_sum_.z += p_tag.z;
+			if (++marker_warmup_n_ >= 5) {
+				marker_origin_ = {
+					marker_warmup_sum_.x / marker_warmup_n_,
+					marker_warmup_sum_.y / marker_warmup_n_,
+					marker_warmup_sum_.z / marker_warmup_n_};
+				marker_warmup_sum_ = {};
+				marker_warmup_n_ = 0;
+				marker_anchor_pending_ = false;
+				marker_last_ts_us_ = ts_us ? ts_us : 1;
+				for (one_euro &f : marker_euro_)
+					f.reset();
+				pos_ = {};
+				pos_valid_ = true;
+			}
+			return;
+		}
+		const double dt =
+			marker_last_ts_us_
+				? elapsed_us32(ts_us, marker_last_ts_us_) / 1e6
+				: 0.04;
+		marker_last_ts_us_ = ts_us ? ts_us : 1;
+		const vec3d rel = {p_tag.x - marker_origin_.x,
+				   p_tag.y - marker_origin_.y,
+				   p_tag.z - marker_origin_.z};
+		// Planar-pose ambiguity flips teleport the camera for a frame
+		// or two; ignore isolated jumps, follow persistent ones.
+		const double jx = rel.x - pos_.x, jy = rel.y - pos_.y,
+			     jz = rel.z - pos_.z;
+		if (jx * jx + jy * jy + jz * jz > 0.10 * 0.10) {
+			if (++marker_outlier_n_ < 5)
+				return;
+		}
+		marker_outlier_n_ = 0;
+		// 1-Euro filter: strong smoothing while still, fast tracking
+		// while leaning, so the screen neither shakes nor lags.
+		const double fdt = clampd(dt, 1e-3, 0.2);
+		pos_.x = marker_euro_[0].filter(rel.x, fdt);
+		pos_.y = marker_euro_[1].filter(rel.y, fdt);
+		pos_.z = marker_euro_[2].filter(rel.z, fdt);
+		pos_valid_ = true;
 	}
 
 	void on_mag(const mag_sample &m)
@@ -137,8 +237,12 @@ public:
 		if (mag_yaw_enabled_)
 			qrel = quat_multiply(mag_yaw_corr_, qrel);
 		qrel = quat_normalize(qrel);
-		return {qrel, latest_omega_, last_imu_ts_us_, is_calibrated_,
-			false, bias_auto_active_, imu_count_, mag_count_};
+		pose_snapshot s = {qrel,  latest_omega_,     last_imu_ts_us_,
+				   is_calibrated_, false, bias_auto_active_,
+				   imu_count_,     mag_count_};
+		s.pos = pos_;
+		s.pos_valid = pos_valid_;
+		return s;
 	}
 
 private:
@@ -450,6 +554,49 @@ private:
 	double mag_yaw_ref_rad_ = 0.0;
 	mag_sample latest_mag_;
 	vec3d latest_omega_;
+	vec3d pos_;
+	bool pos_valid_ = false;
+	// Camera position in the head frame (rotation-center relative); rough
+	// glasses geometry, shared by the One family until measured per model.
+	static constexpr vec3d MARKER_CAM_OFFSET = {0.0, 0.0, -0.09};
+
+	struct one_euro {
+		double x_prev = 0.0;
+		double dx_prev = 0.0;
+		bool init = false;
+		void reset()
+		{
+			init = false;
+			dx_prev = 0.0;
+		}
+		double filter(double x, double dt)
+		{
+			// min cutoff 0.3 Hz, beta 3.0, derivative cutoff 1 Hz.
+			if (!init) {
+				init = true;
+				x_prev = x;
+				dx_prev = 0.0;
+				return x;
+			}
+			const auto alpha = [dt](double cutoff) {
+				const double r = 2.0 * PI * cutoff * dt;
+				return r / (r + 1.0);
+			};
+			const double dx = (x - x_prev) / dt;
+			dx_prev += (dx - dx_prev) * alpha(1.0);
+			const double cutoff = 0.3 + 3.0 * std::fabs(dx_prev);
+			x_prev += (x - x_prev) * alpha(cutoff);
+			return x_prev;
+		}
+	};
+
+	vec3d marker_origin_;
+	bool marker_anchor_pending_ = true;
+	uint32_t marker_last_ts_us_ = 0;
+	vec3d marker_warmup_sum_;
+	int marker_warmup_n_ = 0;
+	int marker_outlier_n_ = 0;
+	one_euro marker_euro_[3];
 	uint64_t imu_count_ = 0;
 	uint64_t mag_count_ = 0;
 };

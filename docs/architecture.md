@@ -23,6 +23,7 @@ src/
   transports/            機種ファミリーごとの IMU セッション（transports.h に一覧）
     xreal_tcp.cpp / xreal_air.cpp(.h) / rayneo.cpp / moverio.cpp / rokid.cpp / viture.cpp / nreal_light.cpp
   cursor_fence.cpp(.h)   メガネ画面へのカーソル進入防止（WH_MOUSE_LL フック）
+  marker_tracker.cpp(.h) マーカー6DoF（XREAL Eye UVC1 + apriltag）
   dock.cpp(.h)           Qt ドック UI とプロジェクター制御
   virtual_source.cpp(.h) 仮想スクリーン入力ソースとワープシェーダー結線
   display-wall-source.cpp(.h)  Display Wall 入力ソース
@@ -181,6 +182,41 @@ OBS Studio のソースはこのリポジトリにはベンダリングしてい
 MAG 補正は既定で無効です。局所的な磁気干渉がヨードリフトより悪化し得るためです。
 これは絶対的な北固定モードではなく、緩やかな相対ヨー補正です。
 
+### マーカー6DoF（XREAL Eye + AprilTag）
+
+XREAL Eye のトラッキングカメラ（UVC1、512×378 YUY2 @25fps）で印刷した
+AprilTag 36h11（ID 0、黒正方形の実寸が既知）を検出し、頭部並進を測って
+仮想スクリーンに視差を与えます。専用スレッド（`marker_worker`）が
+Media Foundation で該当カメラ（ネイティブ 512×378 YUY2 を持つデバイスとして
+特定）を開き、apriltag（BSD-2、`deps/apriltag` に setup.ps1 が v3.4.2 を
+取得して静的リンク）で検出、`estimate_tag_pose`（fx=219px、XREAL 1S+Eye
+実測較正、HFOV≈99°）でタグ座標系のカメラ位置を得ます。カメラ不在時は
+2 秒間隔のスキャンに退避し、UVC の有効/無効・抜き差しに追従します。
+
+設計は「タグは定規でありアンカーではない」方式:
+
+- スクリーンはリセンター位置に固定。リセンター後の安定バースト
+  （5 サンプル、5cm 以内）の平均をタグ座標系の原点として記録し、以後の
+  相対変位が頭部位置になる
+- レバーアーム補正: カメラは頭の回転中心から前方（約 9cm）にあるため、
+  頭の回転だけでカメラが並進してしまう。回転は 3DoF 側で描画済みなので、
+  リセンター済み姿勢でカメラオフセットを回して測定値から差し引く
+- 平面姿勢の反転（ambiguity flip）は単発で数十 cm のテレポートを起こす。
+  現在値から 10cm 超のジャンプは 5 連続するまで無視（実機で 45cm の
+  反転を吸収できることを確認）
+- 平滑は 1-Euro フィルター（静止時 0.3Hz・速度に応じて開放）。静止
+  ジッターを潰しつつリーン追従の遅延を抑える
+- タグ不可視時は位置ホールドで 3DoF に退化。描画は `pose_snapshot.pos` →
+  仮想スクリーンの `eye_pos_m`（レイ原点）に IPD オフセットと合算
+- タグ実寸は `tag_size_mm`（既定 80mm）。検出は ID 0 +
+  decision_margin ≥ 30 のみ受理（机のマス目等の誤検出対策）
+
+検証値（XREAL 1S + Eye、80mm タグ）: タグ視認中の検出率ほぼ 100%
+（20fps）、リーン体験レンジ ±20cm 超、連続ロック圏 ~0.55m・散発 1.1m。
+今後の課題: ドック UI（6DoF ステータス・タグ寸法設定）、UVC1 のみ有効化、
+UVC 揮発の自動再有効化、機種別レバーアーム定数、タグヨーによる IMU
+ドリフト補正。
+
 ### 外部姿勢入力（本体フュージョン機種）
 
 VITURE のように本体でフュージョン済みの姿勢を送ってくる機種は、ジャイロ積分・
@@ -239,7 +275,15 @@ IMU 受信 transport は機種プロファイルで分岐します。
 
 - One-family (`one_bridge_tcp`): USB-Ethernet の TCP ブリッジ (`169.254.2.1:52998`) から
   134 バイトレコードを受け取る。有効レコードが 3 秒途絶えた場合は切断して自動再接続する
-  （Air/RayNeo のセッション内リトライに相当）
+  （Air/RayNeo のセッション内リトライに相当）。セッションは XREAL Eye カメラ用の
+  コントロール HID も開く（1024 バイトレポート、Air MI_04 と同じ 0xFD フレーミング —
+  `build_xreal_control_packet` / `xreal_control_exchange` として共有化。インターフェース
+  特定はカメラステータス照会 0x00D5 への応答で行う）。Eye の装着状態（応答データ
+  先頭バイト 0x00 = 装着）と UVC0/UVC1 状態（0x00D2、u32 の bit12-13/14-15）を
+  5 秒間隔でポーリングして `eye_present` / `eye_uvc` に公開し、ドックの「Eye カメラ」
+  行とトグルボタン（`eye_request` 経由、0x00D3 SET）を駆動する。SET 後はメガネが
+  USB を再列挙して TCP ごと切断されるため、再接続パスが状態を再取得する
+  （プロトコル事実は denkimeganetool/eyecon の WebHID 実装より。実機検証待ち）
 - Air-family (`air_hid`): Windows HID へ START IMU コマンドを送り、入力レポートから
   IMU/MAG を直接受け取る。表示モード切替用に MI_04 のコントロール HID も開く
   （後述「表示モード切替と SBS 出力」）。ストリーム IF の特定はヘッダ判定ではなく

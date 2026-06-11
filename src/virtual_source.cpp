@@ -611,10 +611,18 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 			      0.0005
 		    : 0.0;
 	const vec3d eye_right = rotate_vector(q, {half_ipd_m, 0.0, 0.0});
+	// Marker-6DoF head translation: both eyes shift by the tracked head
+	// position; without a marker tracker this stays at the origin.
+	vec3d head = {};
+	{
+		std::lock_guard<std::mutex> lk(g_device.state_mutex);
+		if (g_device.pose.pos_valid && g_device.pose.connected)
+			head = g_device.pose.pos;
+	}
 	struct vec3 eye_pos;
-	vec3_set(&eye_pos, static_cast<float>(-eye_right.x),
-		 static_cast<float>(-eye_right.y),
-		 static_cast<float>(-eye_right.z));
+	vec3_set(&eye_pos, static_cast<float>(head.x - eye_right.x),
+		 static_cast<float>(head.y - eye_right.y),
+		 static_cast<float>(head.z - eye_right.z));
 	gs_effect_set_vec3(s->p_eye_pos_m, &eye_pos); // left eye (or mono center)
 
 	const bool previous_srgb = gs_set_linear_srgb(true);
@@ -635,9 +643,10 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 			// Effect parameters set between draws are flushed by
 			// device_draw via gs_effect_update_params, so the
 			// right half picks up the right-eye origin.
-			vec3_set(&eye_pos, static_cast<float>(eye_right.x),
-				 static_cast<float>(eye_right.y),
-				 static_cast<float>(eye_right.z));
+			vec3_set(&eye_pos,
+				 static_cast<float>(head.x + eye_right.x),
+				 static_cast<float>(head.y + eye_right.y),
+				 static_cast<float>(head.z + eye_right.z));
 			gs_effect_set_vec3(s->p_eye_pos_m, &eye_pos);
 			gs_matrix_push();
 			gs_matrix_translate3f(static_cast<float>(eye_w), 0.0f,
