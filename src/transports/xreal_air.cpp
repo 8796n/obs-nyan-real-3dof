@@ -281,19 +281,11 @@ static void air_refresh_display_mode(device_manager *f, HANDLE ctrl,
 	f->display_mode_current.store(mode, std::memory_order_relaxed);
 }
 
-static bool looks_like_air_report(const std::vector<uint8_t> &data)
-{
-	if (data.empty())
-		return false;
-	if (data[0] == 0xAA)
-		return true;
-	if (data.size() >= 2) {
-		const uint16_t sig = read_u16_le(data.data());
-		return sig == 0x0201 || sig == 0x53AA;
-	}
-	return false;
-}
-
+// The streaming interface is verified by decoding an actual IMU report, not
+// by header sniffing: the Air 2 adds an always-streaming telemetry interface
+// (MI_05, before MI_03 in enumeration order) whose leading counter byte
+// passes 0xAA every 256 packets, which let it win a header-based probe and
+// left the session decoding nothing ("calibrating" forever).
 static HANDLE open_air_hid_stream(hid_interface_info &selected)
 {
 	for (const auto &info : enumerate_hid_interfaces()) {
@@ -311,14 +303,15 @@ static HANDLE open_air_hid_stream(hid_interface_info &selected)
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		air_send_packet(h, info, AIR_MSG_START_IMU_DATA, {0x01});
 
+		air_timestamp_state probe_ts;
 		const uint64_t start = os_gettime_ns();
-		while (os_gettime_ns() - start < 800000000ULL) {
+		while (!ok && os_gettime_ns() - start < 800000000ULL) {
 			std::vector<uint8_t> report;
+			decoded_sensor_report decoded;
 			if (hid_read_report(h, info.input_report_len, report, 100) &&
-			    looks_like_air_report(report)) {
+			    decode_air_report(report.data(), report.size(),
+					      probe_ts, decoded))
 				ok = true;
-				break;
-			}
 		}
 
 		if (ok) {
