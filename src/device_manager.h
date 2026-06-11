@@ -60,6 +60,8 @@ struct device_manager {
 	std::atomic<float> screen_distance_m{DEFAULT_SCREEN_DISTANCE_M};
 	std::atomic<float> screen_size_factor{1.0f};
 	std::atomic<float> screen_curve{DEFAULT_SCREEN_CURVE};
+	// Interpupillary distance for the SBS per-eye parallax (mm).
+	std::atomic<float> ipd_mm{DEFAULT_IPD_MM};
 
 	std::mutex settings_mutex;
 	std::string ip = "169.254.2.1";

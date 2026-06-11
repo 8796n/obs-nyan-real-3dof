@@ -338,7 +338,8 @@ public:
 		fov_spin->setDecimals(0);
 		fov_spin->setSingleStep(1.0);
 		distance_spin = new NoWheelDoubleSpinBox(screen_group);
-		distance_spin->setRange(1.0, 10.0);
+		distance_spin->setRange(MIN_SCREEN_DISTANCE_M,
+					MAX_SCREEN_DISTANCE_M);
 		distance_spin->setDecimals(1);
 		distance_spin->setSingleStep(0.1);
 		size_spin = new NoWheelDoubleSpinBox(screen_group);
@@ -349,6 +350,10 @@ public:
 		curve_spin->setRange(0.0, MAX_SCREEN_CURVE);
 		curve_spin->setDecimals(2);
 		curve_spin->setSingleStep(0.05);
+		ipd_spin = new NoWheelDoubleSpinBox(screen_group);
+		ipd_spin->setRange(MIN_IPD_MM, MAX_IPD_MM);
+		ipd_spin->setDecimals(1);
+		ipd_spin->setSingleStep(0.5);
 		screen_label = new QLabel(screen_group);
 		screen_form->addRow(obs_module_text("prediction_ms"),
 				    make_double_slider(screen_group, prediction_spin,
@@ -358,16 +363,23 @@ public:
 		screen_form->addRow(obs_module_text("fov_deg"),
 				    make_double_slider(screen_group, fov_spin, &fov_slider,
 						       FOV_SLIDER_SCALE));
+		auto *distance_row = make_double_slider(screen_group, distance_spin,
+							&distance_slider,
+							DISTANCE_SLIDER_SCALE);
+		distance_row->setToolTip(
+			obs_module_text("screen_distance_tooltip"));
 		screen_form->addRow(obs_module_text("screen_distance_m"),
-				    make_double_slider(screen_group, distance_spin,
-						       &distance_slider,
-						       DISTANCE_SLIDER_SCALE));
+				    distance_row);
 		screen_form->addRow(obs_module_text("screen_size_factor"),
 				    make_double_slider(screen_group, size_spin, &size_slider,
 						       SIZE_SLIDER_SCALE));
 		screen_form->addRow(obs_module_text("screen_curve"),
 				    make_double_slider(screen_group, curve_spin, &curve_slider,
 						       CURVE_SLIDER_SCALE));
+		auto *ipd_row = make_double_slider(screen_group, ipd_spin,
+						   &ipd_slider, IPD_SLIDER_SCALE);
+		ipd_row->setToolTip(obs_module_text("ipd_tooltip"));
+		screen_form->addRow(obs_module_text("ipd_mm"), ipd_row);
 		screen_form->addRow(obs_module_text("dock.screen_result"), screen_label);
 		root->addWidget(screen_group);
 
@@ -503,6 +515,13 @@ public:
 					 g_device.screen_curve.store(static_cast<float>(value),
 								     std::memory_order_relaxed);
 				 });
+		QObject::connect(ipd_spin,
+				 static_cast<void (QDoubleSpinBox::*)(double)>(
+					 &QDoubleSpinBox::valueChanged),
+				 this, [](double value) {
+					 g_device.ipd_mm.store(static_cast<float>(value),
+							       std::memory_order_relaxed);
+				 });
 		QObject::connect(mag_yaw_box, &QCheckBox::toggled, this,
 				 [](bool checked) { manager_set_mag_yaw(&g_device, checked); });
 		QObject::connect(debug_box, &QCheckBox::toggled, this, [](bool checked) {
@@ -536,6 +555,7 @@ private:
 	static constexpr int DISTANCE_SLIDER_SCALE = 10;  // step 0.1 m
 	static constexpr int SIZE_SLIDER_SCALE = 20;      // step 0.05 x
 	static constexpr int CURVE_SLIDER_SCALE = 20;     // step 0.05
+	static constexpr int IPD_SLIDER_SCALE = 2;        // step 0.5 mm
 
 	static int slider_value(double value, int scale)
 	{
@@ -623,14 +643,17 @@ private:
 		const double fov = clampd(g_device.fov_deg.load(std::memory_order_relaxed), 20.0,
 					  100.0);
 		const double distance =
-			clampd(g_device.screen_distance_m.load(std::memory_order_relaxed), 1.0,
-			       10.0);
+			clampd(g_device.screen_distance_m.load(std::memory_order_relaxed),
+			       MIN_SCREEN_DISTANCE_M, MAX_SCREEN_DISTANCE_M);
 		const double size_factor =
 			clampd(g_device.screen_size_factor.load(std::memory_order_relaxed),
 			       0.25, 4.0);
 		const double screen_curve =
 			clampd(g_device.screen_curve.load(std::memory_order_relaxed), 0.0,
 			       MAX_SCREEN_CURVE);
+		const double ipd =
+			clampd(g_device.ipd_mm.load(std::memory_order_relaxed),
+			       MIN_IPD_MM, MAX_IPD_MM);
 
 		pose_snapshot p;
 		{
@@ -757,6 +780,21 @@ private:
 			glasses_rect_valid, glasses.x, glasses.y,
 			glasses.x + static_cast<long>(glasses.width),
 			glasses.y + static_cast<long>(glasses.height));
+		// IPD only affects SBS rendering; gray the row out otherwise.
+		// Same output-size fallback as virtual_source_tick, so the row's
+		// state matches what the renderer actually does (including
+		// manual SBS ON without a glasses display).
+		{
+			const model_profile &profile = profile_for(detected);
+			const uint32_t out_w = glasses_rect_valid
+						       ? glasses.width
+						       : profile.display_width;
+			const uint32_t out_h = glasses_rect_valid
+						       ? glasses.height
+						       : profile.display_height;
+			set_double_enabled(ipd_spin, ipd_slider,
+					   sbs_output_active(out_w, out_h));
+		}
 		glasses_display_label->setText(
 			glasses_display_present
 				? QString::fromStdString(
@@ -837,6 +875,7 @@ private:
 		set_double_control(size_spin, size_slider, SIZE_SLIDER_SCALE, size_factor);
 		set_double_control(curve_spin, curve_slider, CURVE_SLIDER_SCALE,
 				   screen_curve);
+		set_double_control(ipd_spin, ipd_slider, IPD_SLIDER_SCALE, ipd);
 		{
 			QSignalBlocker block(mag_yaw_box);
 			mag_yaw_box->setChecked(g_device.mag_yaw.load(std::memory_order_relaxed));
@@ -885,6 +924,8 @@ private:
 	QSlider *size_slider = nullptr;
 	QDoubleSpinBox *curve_spin = nullptr;
 	QSlider *curve_slider = nullptr;
+	QDoubleSpinBox *ipd_spin = nullptr;
+	QSlider *ipd_slider = nullptr;
 	QCheckBox *mag_yaw_box = nullptr;
 	QCheckBox *debug_box = nullptr;
 	QPushButton *projector_button = nullptr;

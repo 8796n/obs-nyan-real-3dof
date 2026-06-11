@@ -18,9 +18,19 @@
 	("obs-nyan-real-3dof " NYAN_REAL_3DOF_VERSION "  (built " NYAN_REAL_3DOF_BUILD_TIME ")")
 
 constexpr float DEFAULT_SCREEN_DISTANCE_M = 4.0f;
+// 0.1 m is an experimental extreme for the "walk up to the screen" effect;
+// with SBS parallax, distances under ~0.5 m strain the eyes (the convergence
+// follows the distance but the glasses' focal plane stays fixed).
+constexpr float MIN_SCREEN_DISTANCE_M = 0.1f;
+constexpr float MAX_SCREEN_DISTANCE_M = 10.0f;
 constexpr float DEFAULT_SCREEN_CURVE = 0.0f;
 constexpr float VIRTUAL_TARGET_RETRY_INTERVAL_S = 1.0f;
 constexpr float MAX_SCREEN_CURVE = 3.0f;
+// Interpupillary distance for SBS per-eye parallax. 63 mm is the adult
+// average; the range covers roughly the 1st..99th percentile.
+constexpr float DEFAULT_IPD_MM = 63.0f;
+constexpr float MIN_IPD_MM = 40.0f;
+constexpr float MAX_IPD_MM = 80.0f;
 
 // IMU mount offset as a rotation around X in degrees. Known values: XREAL One
 // standard +180, XREAL One Pro -150, XREAL Air 0, RayNeo Air -20. Kept as a

@@ -307,6 +307,9 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 		static_cast<float>(get_double_setting(settings, "screen_curve",
 						      DEFAULT_SCREEN_CURVE)),
 		std::memory_order_relaxed);
+	f->ipd_mm.store(static_cast<float>(get_double_setting(settings, "ipd_mm",
+							      DEFAULT_IPD_MM)),
+			std::memory_order_relaxed);
 	f->mag_yaw.store(get_bool_setting(settings, "mag_yaw", false),
 			 std::memory_order_relaxed);
 	f->auto_projector.store(get_bool_setting(settings, "auto_projector", false),
@@ -419,6 +422,7 @@ void manager_reset_defaults(device_manager *f)
 				   std::memory_order_relaxed);
 	f->screen_size_factor.store(1.0f, std::memory_order_relaxed);
 	f->screen_curve.store(DEFAULT_SCREEN_CURVE, std::memory_order_relaxed);
+	f->ipd_mm.store(DEFAULT_IPD_MM, std::memory_order_relaxed);
 	f->mag_yaw.store(false, std::memory_order_relaxed);
 	f->auto_projector.store(false, std::memory_order_relaxed);
 	f->cursor_fence.store(false, std::memory_order_relaxed);
@@ -463,6 +467,8 @@ void manager_save_load(obs_data_t *save_data, bool saving, void *)
 		obs_data_set_double(
 			obj, "screen_curve",
 			g_device.screen_curve.load(std::memory_order_relaxed));
+		obs_data_set_double(obj, "ipd_mm",
+				    g_device.ipd_mm.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "mag_yaw",
 				  g_device.mag_yaw.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "auto_projector",

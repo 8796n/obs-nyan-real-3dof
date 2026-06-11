@@ -264,6 +264,10 @@ viewer-centered cylinder (`1.0`), and can go up to a stronger experimental
 curve (`3.0`) for very wide screens. This helps keep wide-screen edges readable.
 The default follows flinger at 4.0 m / 1.0x, which is about 147 inches for a
 50-degree FOV device, with curvature off.
+`IPD` is the eye separation used for SBS output (default 63 mm). Set it to your
+interpupillary distance and the virtual screen converges stereoscopically at the
+configured screen distance (the eyes naturally converge more as the distance
+shrinks). It has no effect while SBS output is off.
 These settings are global in the dock; the virtual-screen source only renders
 the warp from the shared pose and screen state.
 

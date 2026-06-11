@@ -11,6 +11,10 @@ uniform float2 tan_half_fov;
 uniform float screen_distance_m;
 uniform float2 screen_half_size_m;
 uniform float screen_curve;
+// World-space ray origin. (0,0,0) for mono; in SBS output each eye renders
+// from its own position (the head-frame ±IPD/2 offset rotated by the pose),
+// which converges the screen at screen_distance_m instead of infinity.
+uniform float3 eye_pos_m;
 uniform float debug_tint;
 
 sampler_state linClamp {
@@ -63,16 +67,20 @@ float4 PSWarp(VertData v_in) : TARGET
 		if (d.z >= -1e-4)
 			return float4(0.0, 0.0, 0.0, 1.0);
 
-		float t = -screen_distance_m / d.z;
-		float2 hit = d.xy * t;
+		float t = (-screen_distance_m - eye_pos_m.z) / d.z;
+		if (t <= 1e-4)
+			return float4(0.0, 0.0, 0.0, 1.0);
+		float2 hit = eye_pos_m.xy + d.xy * t;
 		suv = float2(0.5 + hit.x / (2.0 * screen_half_size_m.x),
 			     0.5 - hit.y / (2.0 * screen_half_size_m.y));
 	} else {
 		float radius = screen_distance_m / curve;
 		float center_z = radius - screen_distance_m;
+		float ox = eye_pos_m.x;
+		float oz = eye_pos_m.z - center_z;
 		float a = d.x * d.x + d.z * d.z;
-		float b = -2.0 * center_z * d.z;
-		float c = center_z * center_z - radius * radius;
+		float b = 2.0 * (ox * d.x + oz * d.z);
+		float c = ox * ox + oz * oz - radius * radius;
 		float disc = b * b - 4.0 * a * c;
 		if (a <= 1e-6 || disc < 0.0)
 			return float4(0.0, 0.0, 0.0, 1.0);
@@ -84,7 +92,7 @@ float4 PSWarp(VertData v_in) : TARGET
 		if (t <= 1e-4)
 			return float4(0.0, 0.0, 0.0, 1.0);
 
-		float3 hit = d * t;
+		float3 hit = eye_pos_m + d * t;
 		float theta = atan2(hit.x, center_z - hit.z);
 		float arc_x = radius * theta;
 		suv = float2(0.5 + arc_x / (2.0 * screen_half_size_m.x),
