@@ -9,7 +9,11 @@
 - content script がページの `<audio>/<video>` を `createMediaElementSource()`
   でフックします。この時点で**タブの音は OS の出力デバイスから切り離され**、
   拡張経由 → OBS のモニタリングだけが音の出口になります（二重再生なし）
-- PCM は 16bit に変換してサービスワーカーへ送り、1 本の WebSocket に
+- PCM のキャプチャは AudioWorklet（音声スレッド、約 21ms バッチ）で行い、
+  ページのメインスレッドが重くても途切れません。ページの CSP で Worklet
+  モジュールが読めない場合は ScriptProcessor（約 43ms）へ自動フォール
+  バックします
+- PCM は 16bit でサービスワーカーへ送り、1 本の WebSocket に
   多重化して Audio Wall へ届きます
 - サービスワーカーは `chrome.windows` / `chrome.system.display` で
   ウィンドウ位置を監視し、仮想デスクトップ上の正規化 X 位置（-0.5〜+0.5）を
