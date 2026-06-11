@@ -7,6 +7,11 @@
 // stays consistent).
 "use strict";
 
+// Version of the ingest protocol, sent as "v" in every meta message. Bump
+// together with WS_PROTOCOL_VERSION in src/audio-wall-source.cpp on breaking
+// changes only (additive fields don't count); see CONTRIBUTING.md.
+const PROTOCOL_VERSION = 1;
+
 let ws = null;
 let wsReady = false;
 let reconnectTimer = null;
@@ -45,6 +50,7 @@ async function metaFor(entry) {
   }
   return {
     type: "meta",
+    v: PROTOCOL_VERSION,
     stream: entry.sid,
     label: (tab.title || "tab").slice(0, 80),
     norm_x: normX,

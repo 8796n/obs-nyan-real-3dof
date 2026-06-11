@@ -46,6 +46,12 @@ constexpr const char *APP_AUDIO_CAPTURE_ID = "wasapi_process_output_capture";
 // CAP_DISABLED keeps it out of the add-source menu).
 constexpr const char *WS_AUDIO_SOURCE_ID = "nyan_real_3dof_ws_audio";
 constexpr uint64_t WS_STREAM_TIMEOUT_NS = 5000000000ULL;
+// Version of the extension ingest protocol ("v" in meta messages). The
+// extension auto-updates from the store while the plugin updates manually,
+// so mismatches must be loud instead of silently broken. Bump together with
+// PROTOCOL_VERSION in tools/chrome-extension/background.js on breaking
+// changes only (additive fields don't count); see CONTRIBUTING.md.
+constexpr long long WS_PROTOCOL_VERSION = 1;
 // win-wasapi window-helpers: WINDOW_PRIORITY_EXE. Matching by exe keeps the
 // capture attached while window titles change (browser tabs).
 constexpr int WINDOW_PRIORITY_EXE = 2;
@@ -269,6 +275,10 @@ struct audio_wall_source {
 	std::mutex children_mutex;
 	std::vector<std::unique_ptr<audio_wall_child>> children;
 	std::map<uint64_t, ws_stream> ws_streams; // key: conn<<32 | stream id
+	std::set<uint64_t> ws_warned_conns; // protocol-mismatch warnings sent
+	// Last mismatched extension protocol version, -1 = none; shown in the
+	// source properties so the user sees it without opening the log.
+	std::atomic<long long> ws_proto_mismatch{-1};
 	bool active_children = false;
 
 	// Browser exes currently streaming over WS; the poll thread excludes
@@ -294,9 +304,12 @@ struct audio_wall_source {
 	std::string last_discovery_log;
 };
 
-// Wall texture coordinate (0..1) of a physical desktop x position, using
-// the Display Wall's published layout. Positions between/outside the wall
-// monitors clamp to the nearest mapped edge. False when no wall exists.
+// Wall texture coordinate of a physical desktop x position, using the
+// Display Wall's published layout. Positions outside the wall monitors
+// (excluded displays, the glasses display...) extrapolate linearly with the
+// nearest monitor's scale, so a screen to the right of the wall sounds from
+// beyond the wall's right edge instead of merging with it; the result may
+// leave 0..1 and the caller bounds it. False when no wall exists.
 bool wall_u_from_desktop_x(double x, double *u_out)
 {
 	nyan_wall_monitor_map map[16];
@@ -309,22 +322,22 @@ bool wall_u_from_desktop_x(double x, double *u_out)
 		const nyan_wall_monitor_map &m = map[i];
 		if (m.desk_right <= m.desk_left)
 			continue;
-		if (x >= m.desk_left && x <= m.desk_right) {
-			const double t = (x - m.desk_left) /
-					 (m.desk_right - m.desk_left);
-			*u_out = m.u_left + t * (m.u_right - m.u_left);
-			return true;
-		}
-		const double d = x < m.desk_left ? m.desk_left - x
-						 : x - m.desk_right;
+		const double d = x < m.desk_left
+					 ? m.desk_left - x
+					 : (x > m.desk_right ? x - m.desk_right
+							     : 0.0);
 		if (!nearest || d < nearest_dist) {
 			nearest = &m;
 			nearest_dist = d;
 		}
+		if (d == 0.0)
+			break;
 	}
 	if (!nearest)
 		return false;
-	*u_out = x < nearest->desk_left ? nearest->u_left : nearest->u_right;
+	const double t = (x - nearest->desk_left) /
+			 (nearest->desk_right - nearest->desk_left);
+	*u_out = nearest->u_left + t * (nearest->u_right - nearest->u_left);
 	return true;
 }
 
@@ -350,7 +363,9 @@ bool auto_azimuth_deg(float norm_x, double *out_deg)
 	double u;
 	if (!wall_u_from_desktop_x(desk_x, &u))
 		u = clampd(norm_x, -0.5, 0.5) + 0.5; // wall == desktop
-	const double off = (clampd(u, 0.0, 1.0) - 0.5) * 2.0 * half_w;
+	// Up to half a wall width beyond each edge for off-wall displays;
+	// the final bearing is clamped to +-90 by the filter anyway.
+	const double off = (clampd(u, -0.5, 1.5) - 0.5) * 2.0 * half_w;
 
 	const double curve = clampd(
 		g_device.screen_curve.load(std::memory_order_relaxed), 0.0,
@@ -665,6 +680,18 @@ void wall_ws_text(audio_wall_source *wall, uint64_t conn, obs_data_t *msg)
 		return;
 
 	std::lock_guard<std::mutex> lk(wall->children_mutex);
+	const long long proto = obs_data_get_int(msg, "v");
+	if (proto != WS_PROTOCOL_VERSION) {
+		wall->ws_proto_mismatch.store(proto, std::memory_order_relaxed);
+		if (!wall->ws_warned_conns.count(conn)) {
+			wall->ws_warned_conns.insert(conn);
+			blog(LOG_WARNING,
+			     "[obs-nyan-real-3dof] audio wall: extension speaks ingest protocol v%lld but this plugin expects v%lld; update the older side (extension: tools/chrome-extension)",
+			     proto, WS_PROTOCOL_VERSION);
+		}
+	} else {
+		wall->ws_proto_mismatch.store(-1, std::memory_order_relaxed);
+	}
 	ws_stream &st = wall->ws_streams[key];
 	st.norm_x = static_cast<float>(
 		clampd(obs_data_get_double(msg, "norm_x"), -0.5, 0.5));
@@ -767,6 +794,7 @@ void wall_ws_closed(audio_wall_source *wall, uint64_t conn)
 			++it;
 		}
 	}
+	wall->ws_warned_conns.erase(conn);
 	rebuild_ws_exes_locked(wall);
 }
 
@@ -995,6 +1023,16 @@ obs_properties_t *wall_properties(void *data)
 
 	std::string current = obs_module_text("audiowall.current");
 	if (wall) {
+		const long long mismatch =
+			wall->ws_proto_mismatch.load(std::memory_order_relaxed);
+		if (mismatch >= 0) {
+			char warn[160];
+			snprintf(warn, sizeof(warn),
+				 obs_module_text("audiowall.proto_mismatch"),
+				 mismatch,
+				 static_cast<long long>(WS_PROTOCOL_VERSION));
+			current = std::string(warn) + "\n" + current;
+		}
 		std::lock_guard<std::mutex> lk(wall->children_mutex);
 		if (wall->children.empty() && wall->ws_streams.empty()) {
 			current += " ";

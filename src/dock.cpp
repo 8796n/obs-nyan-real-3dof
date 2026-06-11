@@ -252,8 +252,19 @@ static bool apply_glasses_monitoring_device()
 	const char *cur_name = nullptr;
 	const char *cur_id = nullptr;
 	obs_get_audio_monitoring_device(&cur_name, &cur_id);
-	if (cur_id && m.id == cur_id)
+	if (cur_id && m.id == cur_id) {
+		// Already the configured device - but monitors created while
+		// the USB endpoint was still enumerating (OBS launch racing
+		// the glasses) failed with AUDCLNT_E_DEVICE_INVALIDATED, and
+		// OBS never retries them on its own. The endpoint provably
+		// exists right now (it was just enumerated), so rebuild all
+		// monitors against it. Runs once per glasses connection.
+		obs_reset_audio_monitoring();
+		blog(LOG_INFO,
+		     "[obs-nyan-real-3dof] audio monitoring re-initialized ('%s' is ready)",
+		     m.name.c_str());
 		return true;
+	}
 	if (!obs_set_audio_monitoring_device(m.name.c_str(), m.id.c_str()))
 		return false;
 	blog(LOG_INFO,
