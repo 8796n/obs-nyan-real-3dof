@@ -113,6 +113,9 @@ struct transport_traits {
 	// display_mode_current using these protocol values.
 	const display_mode_option *display_modes = nullptr;
 	size_t display_mode_count = 0;
+	// The XREAL Eye camera accessory: the dock shows its attach state and
+	// a UVC enable/disable toggle (One-family control HID).
+	bool eye_camera = false;
 };
 
 struct vec3d {
@@ -157,6 +160,10 @@ struct pose_snapshot {
 	bool stationary = false;
 	uint64_t imu_count = 0;
 	uint64_t mag_count = 0;
+	// Marker-6DoF head position in the recentered world frame (meters).
+	// Holds the last value while the tag is not visible (3DoF fallback).
+	vec3d pos;
+	bool pos_valid = false;
 };
 
 // Shared by the Air and RayNeo HID decoders.

@@ -21,6 +21,7 @@ struct device_manager {
 
 	std::thread worker;
 	std::thread detect_worker;
+	std::thread marker_worker;
 	std::atomic<bool> stop{false};
 	std::atomic<uint32_t> reconnect_epoch{0};
 	std::atomic<bool> connected{false};
@@ -33,6 +34,8 @@ struct device_manager {
 	std::atomic<bool> auto_monitor{true};
 	// Keep the mouse cursor off the glasses display (dock-driven LL hook).
 	std::atomic<bool> cursor_fence{false};
+	// Marker 6DoF: printed-tag size (black square side) in millimeters.
+	std::atomic<float> tag_size_mm{80.0f};
 	std::atomic<int> detected_model{MODEL_UNKNOWN}; // model_id, set by worker
 	// Mount override in centidegrees, reported by the device itself (RayNeo
 	// derives it from the device-info board id). INT32_MIN = no override,
@@ -53,6 +56,14 @@ struct device_manager {
 	// consumes and applies it, then refreshes current with a GET.
 	std::atomic<int> display_mode_current{-1};
 	std::atomic<int> display_mode_request{-1};
+	// XREAL Eye camera accessory (One-family control HID).
+	// present: -1 unknown/unavailable, 0 absent, 1 attached.
+	// uvc: -1 unknown, 0 disabled, 1 both UVC interfaces enabled.
+	// request: -1 none, 0 disable UVC, 1 enable UVC. The session consumes
+	// it; the glasses re-enumerate USB after the change (brief dropout).
+	std::atomic<int> eye_present{-1};
+	std::atomic<int> eye_uvc{-1};
+	std::atomic<int> eye_request{-1};
 	// SBS output rendering of the virtual screen: 0 = auto (active while
 	// the glasses display runs a double-wide SBS mode), 1 = on, 2 = off.
 	std::atomic<int> sbs_output{0};
@@ -101,6 +112,10 @@ bool publish_sensor_samples(device_manager *f, const imu_sample *imu,
 			    const mag_sample *mag);
 bool publish_external_pose(device_manager *f, const quatd &device_q,
 			   uint32_t ts_us);
+// Marker-6DoF head position (camera position in the tag frame, world axis
+// convention) from the marker tracker thread.
+void publish_marker_position(device_manager *f, const vec3d &p_tag_world,
+			     uint32_t ts_us);
 void maybe_log_sensor_rate(device_manager *f, rate_log_state &st,
 			   const char *transport);
 void worker_fn(device_manager *f);

@@ -75,7 +75,8 @@ transport_traits traits_for(imu_transport t)
 {
 	switch (t) {
 	case imu_transport::one_bridge_tcp:
-		return {"transport.one_bridge_tcp", true, false, false};
+		return {"transport.one_bridge_tcp", true, false, false, nullptr,
+			0, /*eye_camera=*/true};
 	case imu_transport::air_hid:
 		return {"transport.air_hid", false, true, false,
 			air_display_modes, std::size(air_display_modes)};

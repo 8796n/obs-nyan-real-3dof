@@ -22,6 +22,7 @@
 #include "device_registry.h"
 #include "display-wall-source.h"
 #include "dock.h"
+#include "marker_tracker.h"
 #include "nyan_types.h"
 #include "spatial_audio_filter.h"
 #include "virtual_source.h"
@@ -53,6 +54,7 @@ bool obs_module_load(void)
 	init_dock();
 	g_device.detect_worker = std::thread(detect_worker_fn, &g_device);
 	g_device.worker = std::thread(worker_fn, &g_device);
+	g_device.marker_worker = std::thread(marker_worker_fn, &g_device);
 
 	blog(LOG_INFO, "[obs-nyan-real-3dof] loaded: %s (libobs %d.%d.%d)", BUILD_INFO,
 	     LIBOBS_API_MAJOR_VER, LIBOBS_API_MINOR_VER, LIBOBS_API_PATCH_VER);
@@ -71,5 +73,7 @@ void obs_module_unload(void)
 		g_device.worker.join();
 	if (g_device.detect_worker.joinable())
 		g_device.detect_worker.join();
+	if (g_device.marker_worker.joinable())
+		g_device.marker_worker.join();
 	blog(LOG_INFO, "[obs-nyan-real-3dof] unloaded");
 }

@@ -89,6 +89,15 @@ bool publish_external_pose(device_manager *f, const quatd &device_q,
 	return true;
 }
 
+void publish_marker_position(device_manager *f, const vec3d &p_tag_world,
+			     uint32_t ts_us)
+{
+	std::lock_guard<std::mutex> lk(f->state_mutex);
+	f->tracker.on_marker_position(p_tag_world, ts_us);
+	f->pose = f->tracker.snapshot();
+	f->pose.connected = f->connected.load(std::memory_order_relaxed);
+}
+
 static void reset_tracker_for_model_locked(device_manager *f, model_id m)
 {
 	f->tracker.reset();

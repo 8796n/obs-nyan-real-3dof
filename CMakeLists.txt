@@ -37,7 +37,27 @@ target_sources(obs-nyan-real-3dof PRIVATE
   src/transports/moverio.cpp
   src/transports/rokid.cpp
   src/transports/viture.cpp
-  src/transports/nreal_light.cpp)
+  src/transports/nreal_light.cpp
+  src/marker_tracker.cpp)
+
+# apriltag (BSD-2-Clause), cloned by setup.ps1 into deps/apriltag. Only the
+# tag36h11 family is compiled; getopt is excluded (unused, POSIX-flavored).
+set(APRILTAG_DIR "${CMAKE_SOURCE_DIR}/deps/apriltag")
+file(GLOB APRILTAG_COMMON_SOURCES "${APRILTAG_DIR}/common/*.c")
+list(FILTER APRILTAG_COMMON_SOURCES EXCLUDE REGEX "getopt")
+add_library(apriltag_static STATIC
+  "${APRILTAG_DIR}/apriltag.c"
+  "${APRILTAG_DIR}/apriltag_pose.c"
+  "${APRILTAG_DIR}/apriltag_quad_thresh.c"
+  "${APRILTAG_DIR}/tag36h11.c"
+  ${APRILTAG_COMMON_SOURCES})
+target_include_directories(apriltag_static PUBLIC "${APRILTAG_DIR}")
+if(MSVC)
+  # No WIN32_LEAN_AND_MEAN here: apriltag's time_util needs struct timeval
+  # from the winsock header that plain windows.h pulls in.
+  target_compile_definitions(apriltag_static PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+  target_compile_options(apriltag_static PRIVATE /utf-8)
+endif()
 
 target_include_directories(obs-nyan-real-3dof PRIVATE
   "${OBS_SRC}/libobs"
@@ -55,7 +75,12 @@ target_link_libraries(obs-nyan-real-3dof PRIVATE
   Sensorsapi
   PortableDeviceGuids
   Ole32
-  Advapi32)
+  Advapi32
+  apriltag_static
+  Mf
+  Mfplat
+  Mfreadwrite
+  Mfuuid)
 
 if(Qt6_FOUND)
   target_link_libraries(obs-nyan-real-3dof PRIVATE Qt6::Widgets)

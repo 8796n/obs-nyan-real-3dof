@@ -188,10 +188,12 @@ bool air_send_packet(HANDLE h, const hid_interface_info &info, uint8_t msg_id,
 constexpr uint16_t AIR_MCU_MSG_GET_DISPLAY_MODE = 7;
 constexpr uint16_t AIR_MCU_MSG_SET_DISPLAY_MODE = 8;
 
-static std::vector<uint8_t> build_air_mcu_packet(uint16_t msg_id,
-						 const std::vector<uint8_t> &data)
+std::vector<uint8_t> build_xreal_control_packet(uint16_t msg_id,
+						const std::vector<uint8_t> &data,
+						size_t report_len)
 {
-	std::vector<uint8_t> pkt(64, 0);
+	std::vector<uint8_t> pkt(std::max<size_t>(report_len, 22 + data.size()),
+				 0);
 	const uint16_t payload_len = static_cast<uint16_t>(17 + data.size());
 	pkt[0] = 0xFD;
 	pkt[5] = static_cast<uint8_t>(payload_len & 0xFF);
@@ -209,13 +211,20 @@ static std::vector<uint8_t> build_air_mcu_packet(uint16_t msg_id,
 }
 
 // Send a control command and wait briefly for its response. Returns false on
-// timeout; *out_status is the response status byte (0 = OK).
-static bool air_mcu_exchange(HANDLE h, const hid_interface_info &info,
-			     uint16_t msg_id, const std::vector<uint8_t> &data,
-			     uint8_t *out_status, std::vector<uint8_t> *out_data)
+// timeout; *out_status is the response status byte (0 = OK), *out_data the
+// raw payload after it.
+bool xreal_control_exchange(HANDLE h, const hid_interface_info &info,
+			    uint16_t msg_id, const std::vector<uint8_t> &data,
+			    uint8_t *out_status, std::vector<uint8_t> *out_data)
 {
+	const size_t report_len = info.output_report_len
+					  ? static_cast<size_t>(
+						    info.output_report_len)
+					  : 64;
 	if (!hid_write_report(h, info.output_report_len,
-			      build_air_mcu_packet(msg_id, data), 250))
+			      build_xreal_control_packet(msg_id, data,
+							 report_len),
+			      250))
 		return false;
 	std::vector<uint8_t> rep;
 	const uint64_t start = os_gettime_ns();
@@ -238,7 +247,7 @@ static bool air_mcu_exchange(HANDLE h, const hid_interface_info &info,
 			out_data->clear();
 			const size_t end = std::min<size_t>(
 				5 + static_cast<size_t>(payload_len), len);
-			for (size_t i = 23; i < end && d[i]; ++i)
+			for (size_t i = 23; i < end; ++i)
 				out_data->push_back(d[i]);
 		}
 		return true;
@@ -274,8 +283,8 @@ static void air_refresh_display_mode(device_manager *f, HANDLE ctrl,
 	uint8_t status = 0xFF;
 	std::vector<uint8_t> data;
 	int mode = -1;
-	if (air_mcu_exchange(ctrl, info, AIR_MCU_MSG_GET_DISPLAY_MODE, {},
-			     &status, &data) &&
+	if (xreal_control_exchange(ctrl, info, AIR_MCU_MSG_GET_DISPLAY_MODE, {},
+				   &status, &data) &&
 	    status == 0 && !data.empty())
 		mode = data[0];
 	f->display_mode_current.store(mode, std::memory_order_relaxed);
@@ -375,10 +384,10 @@ void run_air_hid_session(device_manager *f, uint32_t &seen_epoch)
 			-1, std::memory_order_relaxed);
 		if (mode_req >= 0 && ctrl != INVALID_HANDLE_VALUE) {
 			uint8_t status = 0xFF;
-			air_mcu_exchange(ctrl, ctrl_info,
-					 AIR_MCU_MSG_SET_DISPLAY_MODE,
-					 {static_cast<uint8_t>(mode_req)},
-					 &status, nullptr);
+			xreal_control_exchange(ctrl, ctrl_info,
+					       AIR_MCU_MSG_SET_DISPLAY_MODE,
+					       {static_cast<uint8_t>(mode_req)},
+					       &status, nullptr);
 			if (f->debug_log.load(std::memory_order_relaxed))
 				blog(LOG_INFO,
 				     "[obs-nyan-real-3dof] Air display mode -> %d "
