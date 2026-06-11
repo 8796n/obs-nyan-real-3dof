@@ -28,6 +28,9 @@ target_sources(obs-nyan-real-3dof PRIVATE
   src/dock.cpp
   src/virtual_source.cpp
   src/display-wall-source.cpp
+  src/audio-wall-source.cpp
+  src/ws_audio_server.cpp
+  src/spatial_audio_filter.cpp
   src/transports/xreal_tcp.cpp
   src/transports/xreal_air.cpp
   src/transports/rayneo.cpp

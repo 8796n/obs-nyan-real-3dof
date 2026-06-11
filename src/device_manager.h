@@ -28,6 +28,9 @@ struct device_manager {
 	std::atomic<bool> debug_log{false};
 	std::atomic<bool> mag_yaw{false};
 	std::atomic<bool> auto_projector{false};
+	// Switch OBS's audio monitoring device to the glasses' USB audio when a
+	// device is detected (one latch per connection, dock-driven).
+	std::atomic<bool> auto_monitor{true};
 	// Keep the mouse cursor off the glasses display (dock-driven LL hook).
 	std::atomic<bool> cursor_fence{false};
 	std::atomic<int> detected_model{MODEL_UNKNOWN}; // model_id, set by worker
@@ -62,6 +65,11 @@ struct device_manager {
 	std::atomic<float> screen_curve{DEFAULT_SCREEN_CURVE};
 	// Interpupillary distance for the SBS per-eye parallax (mm).
 	std::atomic<float> ipd_mm{DEFAULT_IPD_MM};
+	// Physical half width (m) of the virtual screen, published by the
+	// virtual-screen render path every frame (depends on the referenced
+	// texture's aspect, FOV and size factor). 0 until a virtual screen
+	// renders; the Audio Wall derives exact audio bearings from it.
+	std::atomic<float> screen_half_width_m{0.0f};
 
 	std::mutex settings_mutex;
 	std::string ip = "169.254.2.1";

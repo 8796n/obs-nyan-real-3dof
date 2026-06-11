@@ -17,11 +17,13 @@
 
 #include <thread>
 
+#include "audio-wall-source.h"
 #include "device_manager.h"
 #include "device_registry.h"
 #include "display-wall-source.h"
 #include "dock.h"
 #include "nyan_types.h"
+#include "spatial_audio_filter.h"
 #include "virtual_source.h"
 
 OBS_DECLARE_MODULE()
@@ -40,6 +42,8 @@ bool obs_module_load(void)
 
 	register_nyan_real_virtual_source();
 	register_nyan_real_display_wall_source();
+	register_nyan_real_audio_wall_source();
+	register_nyan_real_spatial_audio_filter();
 
 	g_recenter_hotkey_id = obs_hotkey_register_frontend(
 		"nyan_real_3dof.recenter", obs_module_text("hotkey.recenter"),

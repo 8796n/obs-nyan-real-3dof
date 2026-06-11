@@ -185,6 +185,9 @@ static quatd set_warp_effect_parameters(gs_eparam_t *p_pose_q,
 	screen_half_size_m.y = DEFAULT_SCREEN_DISTANCE_M * tan_y *
 			       screen_size_factor * screen_height_factor;
 	screen_half_size_m.x = screen_half_size_m.y * screen_aspect;
+	// Published for the Audio Wall's geometric bearing computation.
+	g_device.screen_half_width_m.store(screen_half_size_m.x,
+					   std::memory_order_relaxed);
 	gs_effect_set_vec2(p_tan_half_fov, &tan_half_fov);
 	gs_effect_set_float(p_screen_distance_m, screen_distance_m);
 	gs_effect_set_vec2(p_screen_half_size_m, &screen_half_size_m);

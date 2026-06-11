@@ -12,8 +12,10 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <climits>
+#include <mutex>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -684,6 +686,36 @@ static void add_active_children(display_wall_source *wall)
 	wall->active_children = true;
 }
 
+// ---- desktop -> wall-texture mapping for the Audio Wall --------------------
+static std::mutex g_wall_map_mutex;
+static std::vector<nyan_wall_monitor_map> g_wall_map;
+static std::atomic<uint32_t> g_wall_map_gen{0};
+
+static void publish_wall_audio_map(display_wall_source *wall)
+{
+	std::vector<nyan_wall_monitor_map> map;
+	if (wall->width > 0) {
+		const float w = static_cast<float>(wall->width);
+		for (const wall_child &child : wall->children) {
+			if (!child.source || child.width == 0)
+				continue;
+			nyan_wall_monitor_map m;
+			m.desk_left = child.monitor.x;
+			m.desk_right = child.monitor.x +
+				       static_cast<long>(child.monitor.width);
+			m.u_left = static_cast<float>(child.x) / w;
+			m.u_right = static_cast<float>(child.x) / w +
+				    static_cast<float>(child.width) / w;
+			map.push_back(m);
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lk(g_wall_map_mutex);
+		g_wall_map = std::move(map);
+	}
+	g_wall_map_gen.fetch_add(1, std::memory_order_relaxed);
+}
+
 static obs_data_t *make_monitor_capture_settings(const monitor_entry &monitor,
 						 bool capture_cursor,
 						 bool force_sdr)
@@ -819,6 +851,7 @@ static void apply_layout(display_wall_source *wall,
 		std::min<uint64_t>(content_height + static_cast<uint64_t>(wall->padding * 2),
 				   UINT32_MAX));
 
+	publish_wall_audio_map(wall);
 	add_active_children(wall);
 }
 
@@ -830,6 +863,7 @@ static void apply_windows_layout(display_wall_source *wall,
 	if (monitors.empty()) {
 		wall->width = static_cast<uint32_t>(wall->padding * 2);
 		wall->height = static_cast<uint32_t>(wall->padding * 2);
+		publish_wall_audio_map(wall);
 		add_active_children(wall);
 		return;
 	}
@@ -877,6 +911,7 @@ static void apply_windows_layout(display_wall_source *wall,
 			static_cast<uint64_t>(wall->padding * 2),
 		UINT32_MAX));
 
+	publish_wall_audio_map(wall);
 	add_active_children(wall);
 }
 
@@ -1443,6 +1478,21 @@ static enum gs_color_space display_wall_get_color_space(
 static obs_source_info display_wall_info = {};
 
 } // namespace
+
+size_t nyan_real_get_wall_monitor_map(nyan_wall_monitor_map *out,
+				      size_t max_count)
+{
+	std::lock_guard<std::mutex> lk(g_wall_map_mutex);
+	const size_t n = std::min(max_count, g_wall_map.size());
+	for (size_t i = 0; i < n; i++)
+		out[i] = g_wall_map[i];
+	return n;
+}
+
+uint32_t nyan_real_wall_map_generation()
+{
+	return g_wall_map_gen.load(std::memory_order_relaxed);
+}
 
 uint16_t nyan_real_pnp_vendor_word(const char *pnp)
 {

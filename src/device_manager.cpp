@@ -314,6 +314,8 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 			 std::memory_order_relaxed);
 	f->auto_projector.store(get_bool_setting(settings, "auto_projector", false),
 				std::memory_order_relaxed);
+	f->auto_monitor.store(get_bool_setting(settings, "auto_monitor", true),
+			      std::memory_order_relaxed);
 	f->cursor_fence.store(get_bool_setting(settings, "cursor_fence", false),
 			      std::memory_order_relaxed);
 	f->debug_log.store(get_bool_setting(settings, "debug_log", false),
@@ -425,6 +427,7 @@ void manager_reset_defaults(device_manager *f)
 	f->ipd_mm.store(DEFAULT_IPD_MM, std::memory_order_relaxed);
 	f->mag_yaw.store(false, std::memory_order_relaxed);
 	f->auto_projector.store(false, std::memory_order_relaxed);
+	f->auto_monitor.store(true, std::memory_order_relaxed);
 	f->cursor_fence.store(false, std::memory_order_relaxed);
 	f->debug_log.store(false, std::memory_order_relaxed);
 	f->sbs_output.store(0, std::memory_order_relaxed);
@@ -473,6 +476,8 @@ void manager_save_load(obs_data_t *save_data, bool saving, void *)
 				  g_device.mag_yaw.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "auto_projector",
 				  g_device.auto_projector.load(std::memory_order_relaxed));
+		obs_data_set_bool(obj, "auto_monitor",
+				  g_device.auto_monitor.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "cursor_fence",
 				  g_device.cursor_fence.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "debug_log",
