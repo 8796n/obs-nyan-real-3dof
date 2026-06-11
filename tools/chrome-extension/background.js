@@ -38,26 +38,85 @@ async function refreshDesktop() {
   desktop = right > left ? { left, width: right - left } : null;
 }
 
-async function metaFor(entry) {
-  const tab = await chrome.tabs.get(entry.tabId);
-  const win = await chrome.windows.get(tab.windowId);
-  if (!desktop) await refreshDesktop();
-  let normX = 0;
-  if (desktop && win.left != null && win.width != null) {
-    const cx = win.left + win.width / 2;
-    normX =
-      Math.max(0, Math.min(1, (cx - desktop.left) / desktop.width)) - 0.5;
-  }
+function normXFromCx(cx) {
+  if (!desktop) return 0;
+  return Math.max(0, Math.min(1, (cx - desktop.left) / desktop.width)) - 0.5;
+}
+
+function buildMeta(entry, normX) {
   return {
     type: "meta",
     v: PROTOCOL_VERSION,
     stream: entry.sid,
-    label: (tab.title || "tab").slice(0, 80),
+    label: entry.label || "tab",
     norm_x: normX,
     sample_rate: entry.sampleRate || 48000,
     channels: 2,
     exe: browserExe(),
   };
+}
+
+async function metaFor(entry) {
+  const tab = await chrome.tabs.get(entry.tabId);
+  const win = await chrome.windows.get(tab.windowId);
+  if (!desktop) await refreshDesktop();
+  entry.label = (tab.title || "tab").slice(0, 80);
+  entry.windowId = tab.windowId;
+  let normX = 0;
+  if (win.left != null && win.width != null) {
+    const cx = win.left + win.width / 2;
+    entry.lastCx = cx;
+    normX = normXFromCx(cx);
+  }
+  return buildMeta(entry, normX);
+}
+
+// Live drag tracking: onBoundsChanged only fires when the move commits and
+// the renderer's window.screenX is not refreshed mid-drag either, but the
+// HWND rect does move and Chromium keeps servicing UI-thread tasks during
+// the modal move loop, so polling chrome.windows.get sees live bounds.
+let posPoll = null;
+function ensurePosPoll() {
+  if (posPoll) return;
+  posPoll = setInterval(async () => {
+    if (!streams.size) {
+      clearInterval(posPoll);
+      posPoll = null;
+      return;
+    }
+    if (!wsReady) return;
+    const byWindow = new Map();
+    for (const entry of streams.values()) {
+      if (entry.windowId == null) continue;
+      if (!byWindow.has(entry.windowId)) byWindow.set(entry.windowId, []);
+      byWindow.get(entry.windowId).push(entry);
+    }
+    for (const [winId, list] of byWindow) {
+      try {
+        const win = await chrome.windows.get(winId);
+        if (win.left == null || win.width == null) continue;
+        const cx = win.left + win.width / 2;
+        for (const entry of list) {
+          if (entry.lastCx != null && Math.abs(cx - entry.lastCx) < 8)
+            continue;
+          entry.lastCx = cx;
+          sendMetaFromCx(entry, cx);
+        }
+      } catch (e) {
+        /* window gone; meta path cleans up via tab close */
+      }
+    }
+  }, 200);
+}
+
+// Live-drag position report from the content script (window.screenX); no
+// chrome.windows round-trip, so it works while the move loop is active.
+async function sendMetaFromCx(entry, cx) {
+  if (!wsReady) return;
+  if (!desktop) await refreshDesktop();
+  try {
+    ws.send(JSON.stringify(buildMeta(entry, normXFromCx(cx))));
+  } catch (e) {}
 }
 
 async function sendMeta(entry) {
@@ -126,6 +185,7 @@ chrome.runtime.onConnect.addListener((p) => {
   if (p.name !== "audio" || p.sender?.tab?.id == null) return;
   const entry = { sid: nextStreamId++, tabId: p.sender.tab.id, sampleRate: 48000 };
   streams.set(p, entry);
+  ensurePosPoll();
   p.onMessage.addListener((msg) => {
     if (msg.type === "start") {
       entry.sampleRate = msg.sampleRate || 48000;
@@ -135,6 +195,9 @@ chrome.runtime.onConnect.addListener((p) => {
       ensureWs().then(() => sendMeta(entry));
     } else if (msg.type === "pcm") {
       sendPcm(entry, msg.b64);
+    } else if (msg.type === "pos") {
+      entry.lastCx = msg.cx;
+      sendMetaFromCx(entry, msg.cx);
     }
   });
   p.onDisconnect.addListener(() => {

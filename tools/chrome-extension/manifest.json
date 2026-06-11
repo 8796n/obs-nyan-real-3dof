@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "nyan Real Audio Wall connector",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "Sends tab audio and window positions to the nyan Real Audio Wall OBS source over a local WebSocket, so each browser window sounds from where it is on the virtual screen.",
   "permissions": ["tabs", "system.display", "storage"],
   "host_permissions": ["<all_urls>"],
