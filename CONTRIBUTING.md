@@ -35,6 +35,31 @@
   同梱しません。例外は README が参照するスクリーンショット（`docs/images/`）で、
   これだけは配布物にも含めます。
 
+## Audio Wall ⇔ Chrome 拡張の WebSocket プロトコル
+
+プラグイン（`src/audio-wall-source.cpp`）と Chrome 拡張
+（`tools/chrome-extension/`）は localhost WebSocket（既定 8796）で会話します。
+拡張はストア配布だと自動更新、プラグインは手動更新のため、版ズレは
+いつか必ず起きます。黙って壊れないために、次のルールを守ってください。
+
+- プロトコルバージョンは 2 箇所で定義されています。**変更時は必ず両方を
+  同時に更新**します:
+  - プラグイン側: `src/audio-wall-source.cpp` の `WS_PROTOCOL_VERSION`
+  - 拡張側: `tools/chrome-extension/background.js` の `PROTOCOL_VERSION`
+    （meta メッセージの `"v"` フィールドとして送信される）
+- バージョンを +1 するのは**互換性が壊れる変更**のときだけです:
+  メッセージ形式やバイナリフレームのレイアウト変更、既存フィールドの
+  意味変更・削除など。**フィールドの追加だけなら上げません**
+  （受信側は未知フィールドを無視する規約）。
+- バージョン不一致のとき、プラグインは接続ごとに 1 回だけ
+  `extension speaks ingest protocol vX but this plugin expects vY` を
+  警告ログに出し、処理はベストエフォートで続けます。プロトコルを
+  変更したら、この警告が新旧の組み合わせで実際に出ることを確認して
+  ください。
+- 拡張の `manifest.json` の `version` はストアへ出すたびに上げますが、
+  プロトコルバージョンとは独立です（プロトコルが同じならいくつ上げても
+  よい）。
+
 ## 開発フロー
 
 `main` への変更は、次の流れを原則とします（`main` への直接 push はしません）。
