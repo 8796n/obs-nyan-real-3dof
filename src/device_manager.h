@@ -14,6 +14,14 @@
 #include "head_tracker.h"
 #include "nyan_types.h"
 
+// Values of device_manager::monitor_out: what the dock does with OBS's audio
+// monitoring device.
+enum monitor_out_mode {
+	MONITOR_OUT_AUTO_GLASSES = 0, // switch to the glasses' USB audio
+	MONITOR_OUT_KEEP = 1,         // leave OBS's monitoring device alone
+	MONITOR_OUT_DEVICE = 2,       // hold monitoring on a chosen endpoint
+};
+
 struct device_manager {
 	std::mutex state_mutex;
 	head_tracker tracker;
@@ -29,9 +37,11 @@ struct device_manager {
 	std::atomic<bool> debug_log{false};
 	std::atomic<bool> mag_yaw{false};
 	std::atomic<bool> auto_projector{false};
-	// Switch OBS's audio monitoring device to the glasses' USB audio when a
-	// device is detected (one latch per connection, dock-driven).
-	std::atomic<bool> auto_monitor{true};
+	// OBS audio-monitoring output policy (monitor_out_mode, dock-driven).
+	// MONITOR_OUT_DEVICE holds monitoring on the endpoint named below; the
+	// selection survives the endpoint being absent (Bluetooth earphones
+	// powered off) and is re-applied when it enumerates again.
+	std::atomic<int> monitor_out{MONITOR_OUT_AUTO_GLASSES};
 	// Keep the mouse cursor off the glasses display (dock-driven LL hook).
 	std::atomic<bool> cursor_fence{false};
 	// Marker 6DoF: printed-tag size (black square side) in millimeters.
@@ -88,6 +98,11 @@ struct device_manager {
 	std::mutex settings_mutex;
 	std::string ip = "169.254.2.1";
 	int port = 52998;
+	// Identity of the MONITOR_OUT_DEVICE choice: the WASAPI endpoint id
+	// (stable across reconnects) plus the last seen name, kept for display
+	// while the endpoint is absent.
+	std::string monitor_device_id;
+	std::string monitor_device_name;
 };
 
 struct rate_log_state {

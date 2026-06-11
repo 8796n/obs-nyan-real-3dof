@@ -360,8 +360,31 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 			 std::memory_order_relaxed);
 	f->auto_projector.store(get_bool_setting(settings, "auto_projector", false),
 				std::memory_order_relaxed);
-	f->auto_monitor.store(get_bool_setting(settings, "auto_monitor", true),
-			      std::memory_order_relaxed);
+	// Monitoring output: settings older than the selector only carry the
+	// auto_monitor bool (true = auto-switch to glasses, false = leave be).
+	int monitor_out = obs_data_has_user_value(settings, "monitor_out")
+				  ? get_int_setting(settings, "monitor_out",
+						    MONITOR_OUT_AUTO_GLASSES)
+				  : (get_bool_setting(settings, "auto_monitor", true)
+					     ? MONITOR_OUT_AUTO_GLASSES
+					     : MONITOR_OUT_KEEP);
+	if (monitor_out < MONITOR_OUT_AUTO_GLASSES ||
+	    monitor_out > MONITOR_OUT_DEVICE)
+		monitor_out = MONITOR_OUT_AUTO_GLASSES;
+	{
+		std::lock_guard<std::mutex> lk(f->settings_mutex);
+		if (obs_data_has_user_value(settings, "monitor_device_id")) {
+			f->monitor_device_id =
+				obs_data_get_string(settings, "monitor_device_id");
+			f->monitor_device_name = obs_data_get_string(
+				settings, "monitor_device_name");
+		}
+		// A device choice without an id cannot be applied; fall back.
+		if (monitor_out == MONITOR_OUT_DEVICE &&
+		    f->monitor_device_id.empty())
+			monitor_out = MONITOR_OUT_AUTO_GLASSES;
+	}
+	f->monitor_out.store(monitor_out, std::memory_order_relaxed);
 	f->cursor_fence.store(get_bool_setting(settings, "cursor_fence", false),
 			      std::memory_order_relaxed);
 	f->screen_dist_from_marker.store(
@@ -463,6 +486,8 @@ void manager_reset_defaults(device_manager *f)
 		reconnect = (f->ip != "169.254.2.1") || (f->port != 52998);
 		f->ip = "169.254.2.1";
 		f->port = 52998;
+		f->monitor_device_id.clear();
+		f->monitor_device_name.clear();
 	}
 	reconnect = reconnect ||
 		    !f->connect_enabled.exchange(true, std::memory_order_relaxed);
@@ -476,7 +501,7 @@ void manager_reset_defaults(device_manager *f)
 	f->ipd_mm.store(DEFAULT_IPD_MM, std::memory_order_relaxed);
 	f->mag_yaw.store(false, std::memory_order_relaxed);
 	f->auto_projector.store(false, std::memory_order_relaxed);
-	f->auto_monitor.store(true, std::memory_order_relaxed);
+	f->monitor_out.store(MONITOR_OUT_AUTO_GLASSES, std::memory_order_relaxed);
 	f->cursor_fence.store(false, std::memory_order_relaxed);
 	f->screen_dist_from_marker.store(false, std::memory_order_relaxed);
 	f->debug_log.store(false, std::memory_order_relaxed);
@@ -526,8 +551,19 @@ void manager_save_load(obs_data_t *save_data, bool saving, void *)
 				  g_device.mag_yaw.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "auto_projector",
 				  g_device.auto_projector.load(std::memory_order_relaxed));
+		const int monitor_out =
+			g_device.monitor_out.load(std::memory_order_relaxed);
+		obs_data_set_int(obj, "monitor_out", monitor_out);
+		{
+			std::lock_guard<std::mutex> lk(g_device.settings_mutex);
+			obs_data_set_string(obj, "monitor_device_id",
+					    g_device.monitor_device_id.c_str());
+			obs_data_set_string(obj, "monitor_device_name",
+					    g_device.monitor_device_name.c_str());
+		}
+		// Downgrade compatibility: older builds only read this bool.
 		obs_data_set_bool(obj, "auto_monitor",
-				  g_device.auto_monitor.load(std::memory_order_relaxed));
+				  monitor_out == MONITOR_OUT_AUTO_GLASSES);
 		obs_data_set_bool(obj, "cursor_fence",
 				  g_device.cursor_fence.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "screen_dist_from_marker",

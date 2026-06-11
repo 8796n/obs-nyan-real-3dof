@@ -8,6 +8,7 @@
 #include <obs-module.h>
 
 #ifdef NYAN_REAL_3DOF_WITH_QT_DOCK
+#include <QAbstractItemView>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -225,20 +226,20 @@ static bool is_glasses_audio_name(const char *name)
 	return false;
 }
 
-// Switch OBS's audio monitoring device to the glasses' USB audio endpoint.
-// Returns true once monitoring points at the glasses (already or newly set);
-// false while no glasses audio endpoint is present yet (USB audio can
-// enumerate later than HID, so the caller retries on its poll).
-static bool apply_glasses_monitoring_device()
+// Monitoring-device enumeration result for the dock's output selector.
+struct monitoring_device_match {
+	std::string name;
+	std::string id;
+	bool found = false;
+};
+
+// Find the glasses' USB audio endpoint by brand token.
+static monitoring_device_match find_glasses_monitoring_device()
 {
-	struct match_t {
-		std::string name;
-		std::string id;
-		bool found = false;
-	} m;
+	monitoring_device_match m;
 	obs_enum_audio_monitoring_devices(
 		[](void *data, const char *name, const char *id) {
-			auto *m = static_cast<match_t *>(data);
+			auto *m = static_cast<monitoring_device_match *>(data);
 			if (!is_glasses_audio_name(name))
 				return true;
 			m->name = name ? name : "";
@@ -247,18 +248,52 @@ static bool apply_glasses_monitoring_device()
 			return false;
 		},
 		&m);
-	if (!m.found)
-		return false;
+	return m;
+}
+
+// Find a monitoring device by its WASAPI endpoint id - the persisted identity
+// of the dock's device choice. Ids are stable across reconnects, while names
+// can change with the connection state.
+static monitoring_device_match
+find_monitoring_device_by_id(const std::string &want_id)
+{
+	struct ctx_t {
+		const std::string *want;
+		monitoring_device_match m;
+	} c = {&want_id, {}};
+	if (want_id.empty())
+		return c.m;
+	obs_enum_audio_monitoring_devices(
+		[](void *data, const char *name, const char *id) {
+			auto *c = static_cast<ctx_t *>(data);
+			if (!id || *c->want != id)
+				return true;
+			c->m.name = name ? name : "";
+			c->m.id = id;
+			c->m.found = true;
+			return false;
+		},
+		&c);
+	return c.m;
+}
+
+// Point OBS's audio monitoring at the device. Returns true once monitoring
+// points at it (already or newly set); the caller latches the success and
+// re-arms when the endpoint disappears.
+static bool apply_monitoring_device(const monitoring_device_match &m,
+				    const char *why)
+{
 	const char *cur_name = nullptr;
 	const char *cur_id = nullptr;
 	obs_get_audio_monitoring_device(&cur_name, &cur_id);
 	if (cur_id && m.id == cur_id) {
 		// Already the configured device - but monitors created while
-		// the USB endpoint was still enumerating (OBS launch racing
-		// the glasses) failed with AUDCLNT_E_DEVICE_INVALIDATED, and
-		// OBS never retries them on its own. The endpoint provably
-		// exists right now (it was just enumerated), so rebuild all
-		// monitors against it. Runs once per glasses connection.
+		// the endpoint was still enumerating (OBS launch racing the
+		// glasses' USB audio, Bluetooth reconnecting) failed with
+		// AUDCLNT_E_DEVICE_INVALIDATED, and OBS never retries them on
+		// its own. The endpoint provably exists right now (it was
+		// just enumerated), so rebuild all monitors against it. Runs
+		// once per appearance via the caller's latch.
 		obs_reset_audio_monitoring();
 		blog(LOG_INFO,
 		     "[obs-nyan-real-3dof] audio monitoring re-initialized ('%s' is ready)",
@@ -268,8 +303,8 @@ static bool apply_glasses_monitoring_device()
 	if (!obs_set_audio_monitoring_device(m.name.c_str(), m.id.c_str()))
 		return false;
 	blog(LOG_INFO,
-	     "[obs-nyan-real-3dof] audio monitoring device -> '%s' (glasses detected)",
-	     m.name.c_str());
+	     "[obs-nyan-real-3dof] audio monitoring device -> '%s' (%s)",
+	     m.name.c_str(), why);
 	return true;
 }
 
@@ -396,17 +431,17 @@ public:
 			obs_module_text("dock.auto_projector"), device_group);
 		auto_projector_box->setToolTip(
 			obs_module_text("dock.auto_projector_tooltip"));
-		auto_monitor_box = new QCheckBox(
-			obs_module_text("dock.auto_monitor"), device_group);
-		auto_monitor_box->setToolTip(
-			obs_module_text("dock.auto_monitor_tooltip"));
+		monitor_combo = new NoWheelComboBox(device_group);
+		monitor_combo->setToolTip(
+			obs_module_text("dock.monitor_out_tooltip"));
 		cursor_fence_box = new QCheckBox(
 			obs_module_text("dock.cursor_fence"), device_group);
 		cursor_fence_box->setToolTip(
 			obs_module_text("dock.cursor_fence_tooltip"));
 		device_form->addRow(QString(), projector_button);
 		device_form->addRow(QString(), auto_projector_box);
-		device_form->addRow(QString(), auto_monitor_box);
+		device_form->addRow(obs_module_text("dock.monitor_out"),
+				    monitor_combo);
 		device_form->addRow(QString(), cursor_fence_box);
 		root->addWidget(device_group);
 
@@ -554,16 +589,47 @@ public:
 						 checked,
 						 std::memory_order_relaxed);
 				 });
-		QObject::connect(auto_monitor_box, &QCheckBox::toggled, this,
-				 [this](bool checked) {
-					 g_device.auto_monitor.store(
-						 checked,
-						 std::memory_order_relaxed);
-					 // Re-arm so enabling applies on the
-					 // next poll without replugging.
-					 if (checked)
-						 auto_monitor_applied = false;
-				 });
+		// activated fires only on user picks, not on the poll's
+		// programmatic rebuilds.
+		QObject::connect(
+			monitor_combo, QOverload<int>::of(&QComboBox::activated),
+			this, [this](int index) {
+				const QString id =
+					monitor_combo->itemData(index).toString();
+				if (id == QStringLiteral("@auto")) {
+					g_device.monitor_out.store(
+						MONITOR_OUT_AUTO_GLASSES,
+						std::memory_order_relaxed);
+				} else if (id == QStringLiteral("@keep")) {
+					g_device.monitor_out.store(
+						MONITOR_OUT_KEEP,
+						std::memory_order_relaxed);
+				} else {
+					// Raw endpoint name (no state suffix)
+					// kept alongside the label.
+					const QString name =
+						monitor_combo
+							->itemData(index,
+								   Qt::UserRole + 1)
+							.toString();
+					{
+						std::lock_guard<std::mutex> lk(
+							g_device.settings_mutex);
+						g_device.monitor_device_id =
+							id.toStdString();
+						g_device.monitor_device_name =
+							name.toStdString();
+					}
+					g_device.monitor_out.store(
+						MONITOR_OUT_DEVICE,
+						std::memory_order_relaxed);
+				}
+				// Re-arm so the choice applies on the next
+				// poll without replugging.
+				auto_monitor_applied = false;
+				monitor_device_applied = false;
+				refresh();
+			});
 		// The fence itself rises/falls on the next poll tick, which
 		// also knows the current glasses-display rect.
 		QObject::connect(cursor_fence_box, &QCheckBox::toggled, this,
@@ -962,20 +1028,49 @@ private:
 			auto_projector_box->setChecked(g_device.auto_projector.load(
 				std::memory_order_relaxed));
 		}
-		{
-			QSignalBlocker block(auto_monitor_box);
-			auto_monitor_box->setChecked(g_device.auto_monitor.load(
-				std::memory_order_relaxed));
-		}
-		// Monitoring auto-switch: one latch per detected connection.
-		// USB audio can show up later than HID, so retry on every
-		// poll until the endpoint exists.
-		if (detected == MODEL_UNKNOWN) {
-			auto_monitor_applied = false;
-		} else if (g_device.auto_monitor.load(std::memory_order_relaxed) &&
-			   !auto_monitor_applied &&
-			   apply_glasses_monitoring_device()) {
-			auto_monitor_applied = true;
+		refresh_monitor_combo();
+		const int monitor_out =
+			g_device.monitor_out.load(std::memory_order_relaxed);
+		if (monitor_out == MONITOR_OUT_AUTO_GLASSES) {
+			// One auto-switch latch per detected connection. USB
+			// audio can show up later than HID, so retry on every
+			// poll until the endpoint exists.
+			if (detected == MODEL_UNKNOWN) {
+				auto_monitor_applied = false;
+			} else if (!auto_monitor_applied) {
+				const monitoring_device_match m =
+					find_glasses_monitoring_device();
+				if (m.found &&
+				    apply_monitoring_device(m,
+							    "glasses detected"))
+					auto_monitor_applied = true;
+			}
+		} else if (monitor_out == MONITOR_OUT_DEVICE) {
+			// Hold monitoring on the chosen endpoint. While it is
+			// absent (Bluetooth powered off) the choice stays put
+			// and OBS monitoring is left untouched; the latch
+			// re-arms so the endpoint is re-applied the moment it
+			// enumerates again.
+			std::string want_id;
+			{
+				std::lock_guard<std::mutex> lk(
+					g_device.settings_mutex);
+				want_id = g_device.monitor_device_id;
+			}
+			const monitoring_device_match m =
+				find_monitoring_device_by_id(want_id);
+			if (!m.found) {
+				monitor_device_applied = false;
+			} else if (!monitor_device_applied &&
+				   apply_monitoring_device(m,
+							   "selected output")) {
+				monitor_device_applied = true;
+				// Endpoint names drift with connection state;
+				// keep the stored display name current.
+				std::lock_guard<std::mutex> lk(
+					g_device.settings_mutex);
+				g_device.monitor_device_name = m.name;
+			}
 		}
 		{
 			QSignalBlocker block(cursor_fence_box);
@@ -1065,6 +1160,93 @@ private:
 							apparent_fov));
 	}
 
+	// Sync the monitoring-output combo with the present device list and
+	// the stored selection. itemData carries the endpoint id ("@auto" /
+	// "@keep" for the modes), UserRole + 1 the raw endpoint name without
+	// the absent-state suffix. Rebuilds only when the content actually
+	// changed, so the poll does not disturb the combo needlessly.
+	void refresh_monitor_combo()
+	{
+		const int mode =
+			g_device.monitor_out.load(std::memory_order_relaxed);
+		std::string sel_id, sel_name;
+		{
+			std::lock_guard<std::mutex> lk(g_device.settings_mutex);
+			sel_id = g_device.monitor_device_id;
+			sel_name = g_device.monitor_device_name;
+		}
+		struct entry_t {
+			QString label;
+			QString id;
+			QString name;
+		};
+		QList<entry_t> entries;
+		entries.append({QString::fromUtf8(obs_module_text(
+					 "dock.monitor_out.auto")),
+				QStringLiteral("@auto"), QString()});
+		entries.append({QString::fromUtf8(obs_module_text(
+					 "dock.monitor_out.keep")),
+				QStringLiteral("@keep"), QString()});
+		obs_enum_audio_monitoring_devices(
+			[](void *data, const char *name, const char *id) {
+				auto *e = static_cast<QList<entry_t> *>(data);
+				const QString n =
+					QString::fromUtf8(name ? name : "");
+				e->append({n, QString::fromUtf8(id ? id : ""),
+					   n});
+				return true;
+			},
+			&entries);
+		int want_index = 0; // MONITOR_OUT_AUTO_GLASSES
+		if (mode == MONITOR_OUT_KEEP) {
+			want_index = 1;
+		} else if (mode == MONITOR_OUT_DEVICE && !sel_id.empty()) {
+			want_index = -1;
+			for (int i = 2; i < entries.size(); ++i) {
+				if (entries[i].id.toStdString() == sel_id) {
+					want_index = i;
+					break;
+				}
+			}
+			if (want_index < 0) {
+				// The remembered endpoint is absent (Bluetooth
+				// powered off): keep it listed and selected
+				// instead of dropping the user's choice.
+				const QString name = QString::fromStdString(
+					sel_name.empty() ? sel_id : sel_name);
+				entries.append(
+					{name + QString::fromUtf8(obs_module_text(
+							"dock.monitor_out.missing_suffix")),
+					 QString::fromStdString(sel_id), name});
+				want_index = entries.size() - 1;
+			}
+		}
+		bool same = monitor_combo->count() == entries.size();
+		for (int i = 0; same && i < entries.size(); ++i) {
+			same = monitor_combo->itemText(i) == entries[i].label &&
+			       monitor_combo->itemData(i).toString() ==
+				       entries[i].id;
+		}
+		if (same) {
+			if (monitor_combo->currentIndex() != want_index) {
+				QSignalBlocker block(monitor_combo);
+				monitor_combo->setCurrentIndex(want_index);
+			}
+			return;
+		}
+		// Rebuilding closes an open popup; retry on the next poll.
+		if (monitor_combo->view()->isVisible())
+			return;
+		QSignalBlocker block(monitor_combo);
+		monitor_combo->clear();
+		for (const entry_t &e : entries) {
+			monitor_combo->addItem(e.label, e.id);
+			monitor_combo->setItemData(monitor_combo->count() - 1,
+						   e.name, Qt::UserRole + 1);
+		}
+		monitor_combo->setCurrentIndex(want_index);
+	}
+
 	QLabel *hid_label = nullptr;
 	QLabel *glasses_display_label = nullptr;
 	QLabel *transport_label = nullptr;
@@ -1103,14 +1285,17 @@ private:
 	QCheckBox *debug_box = nullptr;
 	QPushButton *projector_button = nullptr;
 	QCheckBox *auto_projector_box = nullptr;
-	QCheckBox *auto_monitor_box = nullptr;
+	QComboBox *monitor_combo = nullptr;
 	QCheckBox *cursor_fence_box = nullptr;
 	// Auto-open latch: one projector per glasses-display connection,
 	// re-armed when a virtual screen source first appears.
 	bool auto_projector_opened = false;
 	int last_virtual_count = -1;
-	// Monitoring-device latch: one auto-switch per detected connection.
+	// Monitoring-device latches: auto mode arms once per detected
+	// connection, device mode once per endpoint appearance (re-armed when
+	// the endpoint disappears so its return re-applies the choice).
 	bool auto_monitor_applied = false;
+	bool monitor_device_applied = false;
 	// Projectors seen on the glasses screen; closed on display removal.
 	QList<QPointer<QWidget>> glasses_projectors;
 	QTimer *timer = nullptr;
