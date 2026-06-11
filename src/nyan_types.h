@@ -38,6 +38,10 @@ constexpr float MOUNT_X_DEG_ROKID_AIR = -1.3f;
 // XRLinuxDriver's pitch adjustments for the VITURE families.
 constexpr float MOUNT_X_DEG_VITURE_ONE = 6.0f;
 constexpr float MOUNT_X_DEG_VITURE_PRO = 3.0f;
+// ar-drivers-rs models the Nreal Light display as tilted -0.265 rad against
+// the IMU; the sign follows the same convention mapping confirmed on Rokid
+// hardware (their 0.07 rad = our -4 deg).
+constexpr float MOUNT_X_DEG_NREAL_LIGHT = 15.2f;
 
 enum class imu_transport : int {
 	none = 0,
@@ -47,6 +51,7 @@ enum class imu_transport : int {
 	sensor_api = 4, // Windows Sensor API (HID sensor collections)
 	rokid_hid = 5,
 	viture_hid = 6, // fused euler angles over vendor HID
+	nreal_hid = 7,  // Nreal Light: raw IMU from the OV580 coprocessor
 };
 
 // Device identity. HID detection resolves a present USB device into a 1-based

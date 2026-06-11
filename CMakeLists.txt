@@ -33,7 +33,8 @@ target_sources(obs-nyan-real-3dof PRIVATE
   src/transports/rayneo.cpp
   src/transports/moverio.cpp
   src/transports/rokid.cpp
-  src/transports/viture.cpp)
+  src/transports/viture.cpp
+  src/transports/nreal_light.cpp)
 
 target_include_directories(obs-nyan-real-3dof PRIVATE
   "${OBS_SRC}/libobs"
