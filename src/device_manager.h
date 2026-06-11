@@ -22,6 +22,17 @@ enum monitor_out_mode {
 	MONITOR_OUT_DEVICE = 2,       // hold monitoring on a chosen endpoint
 };
 
+// Bits of device_manager::dock_collapsed: which dock sections are folded.
+enum dock_section_bit : uint32_t {
+	DOCK_SECTION_STATUS = 1u << 0,
+	DOCK_SECTION_DEVICE = 1u << 1,
+	DOCK_SECTION_OUTPUT = 1u << 2,
+	DOCK_SECTION_MARKER = 1u << 3,
+	DOCK_SECTION_SCREEN = 1u << 4,
+	DOCK_SECTION_ADVANCED = 1u << 5,
+};
+constexpr uint32_t DOCK_COLLAPSED_DEFAULT = DOCK_SECTION_ADVANCED;
+
 struct device_manager {
 	std::mutex state_mutex;
 	head_tracker tracker;
@@ -44,6 +55,8 @@ struct device_manager {
 	std::atomic<int> monitor_out{MONITOR_OUT_AUTO_GLASSES};
 	// Keep the mouse cursor off the glasses display (dock-driven LL hook).
 	std::atomic<bool> cursor_fence{false};
+	// Folded dock sections (dock_section_bit mask, dock-driven).
+	std::atomic<uint32_t> dock_collapsed{DOCK_COLLAPSED_DEFAULT};
 	// Marker 6DoF: printed-tag size (black square side) in millimeters.
 	std::atomic<float> tag_size_mm{80.0f};
 	// Set the virtual-screen distance from the measured head-to-tag

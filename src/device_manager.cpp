@@ -387,6 +387,11 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 	f->monitor_out.store(monitor_out, std::memory_order_relaxed);
 	f->cursor_fence.store(get_bool_setting(settings, "cursor_fence", false),
 			      std::memory_order_relaxed);
+	f->dock_collapsed.store(
+		static_cast<uint32_t>(get_int_setting(
+			settings, "dock_collapsed",
+			static_cast<int>(DOCK_COLLAPSED_DEFAULT))),
+		std::memory_order_relaxed);
 	f->screen_dist_from_marker.store(
 		get_bool_setting(settings, "screen_dist_from_marker", false),
 		std::memory_order_relaxed);
@@ -503,6 +508,7 @@ void manager_reset_defaults(device_manager *f)
 	f->auto_projector.store(false, std::memory_order_relaxed);
 	f->monitor_out.store(MONITOR_OUT_AUTO_GLASSES, std::memory_order_relaxed);
 	f->cursor_fence.store(false, std::memory_order_relaxed);
+	f->dock_collapsed.store(DOCK_COLLAPSED_DEFAULT, std::memory_order_relaxed);
 	f->screen_dist_from_marker.store(false, std::memory_order_relaxed);
 	f->debug_log.store(false, std::memory_order_relaxed);
 	f->sbs_output.store(0, std::memory_order_relaxed);
@@ -566,6 +572,9 @@ void manager_save_load(obs_data_t *save_data, bool saving, void *)
 				  monitor_out == MONITOR_OUT_AUTO_GLASSES);
 		obs_data_set_bool(obj, "cursor_fence",
 				  g_device.cursor_fence.load(std::memory_order_relaxed));
+		obs_data_set_int(obj, "dock_collapsed",
+				 g_device.dock_collapsed.load(
+					 std::memory_order_relaxed));
 		obs_data_set_bool(obj, "screen_dist_from_marker",
 				  g_device.screen_dist_from_marker.load(
 					  std::memory_order_relaxed));

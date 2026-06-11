@@ -15,7 +15,6 @@
 #include <QDoubleSpinBox>
 #include <QDockWidget>
 #include <QFormLayout>
-#include <QGroupBox>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -28,6 +27,8 @@
 #include <QScrollArea>
 #include <QSize>
 #include <QSizePolicy>
+#include <QFrame>
+#include <QMouseEvent>
 #include <QSpinBox>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -40,6 +41,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
 
 #include "cursor_fence.h"
@@ -334,6 +336,108 @@ protected:
 	void wheelEvent(QWheelEvent *event) override { event->ignore(); }
 };
 
+// Full-width clickable band for a section header. Plain QFrame so the QSS
+// background applies; the click callback avoids Q_OBJECT/moc.
+class DockSectionHeader final : public QFrame {
+public:
+	std::function<void()> on_click;
+
+protected:
+	void mousePressEvent(QMouseEvent *event) override
+	{
+		if (event->button() == Qt::LeftButton && on_click)
+			on_click();
+		QFrame::mousePressEvent(event);
+	}
+};
+
+// Collapsible dock section: a full-width header band (arrow + bold title +
+// optional collapsed-state summary) above a body widget. The gray-overlay
+// band reads as a section divider on dark and light themes alike.
+class DockSection final : public QWidget {
+public:
+	std::function<void(bool open)> on_toggled; // user clicks only
+
+	DockSection(const QString &title, QWidget *body,
+		    QWidget *parent = nullptr)
+		: QWidget(parent),
+		  body_(body)
+	{
+		auto *lay = new QVBoxLayout(this);
+		lay->setContentsMargins(0, 0, 0, 0);
+		lay->setSpacing(2);
+		header_ = new DockSectionHeader();
+		header_->setObjectName("nyanDockSectionHeader");
+		header_->setStyleSheet(
+			"#nyanDockSectionHeader {"
+			" background-color: rgba(128,128,128,0.16);"
+			" border-radius: 4px; }"
+			"#nyanDockSectionHeader:hover {"
+			" background-color: rgba(128,128,128,0.28); }");
+		header_->setCursor(Qt::PointingHandCursor);
+		auto *hl = new QHBoxLayout(header_);
+		hl->setContentsMargins(8, 4, 8, 4);
+		hl->setSpacing(6);
+		arrow_ = new QLabel(header_);
+		title_ = new QLabel(title, header_);
+		QFont title_font = title_->font();
+		title_font.setBold(true);
+		title_->setFont(title_font);
+		summary_ = new QLabel(header_);
+		summary_->setVisible(false);
+		// Arrow pinned to the left edge; the title (+ collapsed
+		// summary) sits in the true center of the band thanks to a
+		// phantom spacer of the arrow's width on the right.
+		arrow_->setText(QStringLiteral("▾"));
+		int arrow_w = arrow_->sizeHint().width();
+		arrow_->setText(QStringLiteral("▸"));
+		arrow_w = std::max(arrow_w, arrow_->sizeHint().width());
+		arrow_->setFixedWidth(arrow_w);
+		auto *balance = new QLabel(header_);
+		balance->setFixedWidth(arrow_w);
+		hl->addWidget(arrow_);
+		hl->addStretch(1);
+		hl->addWidget(title_);
+		hl->addWidget(summary_);
+		hl->addStretch(1);
+		hl->addWidget(balance);
+		lay->addWidget(header_);
+		lay->addWidget(body_);
+		header_->on_click = [this]() { set_open(!open_, true); };
+		set_open(true, false);
+	}
+
+	// Programmatic open/close (settings load): no callback, so the
+	// persistence binding does not echo the value back.
+	void set_expanded(bool open) { set_open(open, false); }
+
+	void set_summary(const QString &text, const QString &tooltip)
+	{
+		summary_->setText(text);
+		summary_->setToolTip(tooltip);
+		summary_->setVisible(!open_ && !text.isEmpty());
+	}
+
+private:
+	void set_open(bool open, bool notify)
+	{
+		open_ = open;
+		arrow_->setText(open ? QStringLiteral("▾")
+				     : QStringLiteral("▸"));
+		body_->setVisible(open);
+		summary_->setVisible(!open && !summary_->text().isEmpty());
+		if (notify && on_toggled)
+			on_toggled(open);
+	}
+
+	DockSectionHeader *header_ = nullptr;
+	QLabel *arrow_ = nullptr;
+	QLabel *title_ = nullptr;
+	QLabel *summary_ = nullptr;
+	QWidget *body_ = nullptr;
+	bool open_ = true;
+};
+
 class NyanRealDock final : public QScrollArea {
 public:
 	explicit NyanRealDock(QWidget *parent = nullptr) : QScrollArea(parent)
@@ -349,24 +453,34 @@ public:
 		root->setContentsMargins(10, 10, 10, 10);
 		root->setSpacing(8);
 
+		// Pose-follow toggle, drawn with OBS's source-visibility eye
+		// icon (theme class "indicator-visibility"). OFF freezes the
+		// warp and closes the device connection.
+		connect_box = new QCheckBox(content);
+		connect_box->setProperty("class",
+					 "checkbox-icon indicator-visibility");
+		connect_box->setToolTip(
+			obs_module_text("dock.pose_follow_tooltip"));
 		auto *action_row_1 = new QHBoxLayout();
 		auto *recenter = new QPushButton(obs_module_text("recenter"), content);
 		auto *recalibrate = new QPushButton(obs_module_text("recalibrate"), content);
 		recenter->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 		recalibrate->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+		action_row_1->addWidget(connect_box);
 		action_row_1->addWidget(recenter);
 		action_row_1->addWidget(recalibrate);
 		root->addLayout(action_row_1);
 
 
-		auto *status_group = new QGroupBox(obs_module_text("dock.status"), content);
-		auto *status_form = new QFormLayout(status_group);
-		hid_label = new QLabel(status_group);
-		glasses_display_label = new QLabel(status_group);
-		transport_label = new QLabel(status_group);
-		stream_label = new QLabel(status_group);
-		pose_label = new QLabel(status_group);
-		virtual_label = new QLabel(status_group);
+		auto *status_body = new QWidget(content);
+		auto *status_form = new QFormLayout(status_body);
+		status_form->setContentsMargins(16, 0, 0, 4);
+		hid_label = new QLabel(status_body);
+		glasses_display_label = new QLabel(status_body);
+		transport_label = new QLabel(status_body);
+		stream_label = new QLabel(status_body);
+		pose_label = new QLabel(status_body);
+		virtual_label = new QLabel(status_body);
 		status_form->addRow(obs_module_text("dock.hid"), hid_label);
 		status_form->addRow(obs_module_text("dock.glasses_display"),
 				    glasses_display_label);
@@ -375,22 +489,20 @@ public:
 		status_form->addRow(obs_module_text("dock.pose"), pose_label);
 		status_form->addRow(obs_module_text("dock.virtual_sources"),
 				    virtual_label);
-		root->addWidget(status_group);
+		status_section = new DockSection(obs_module_text("dock.status"),
+						 status_body, content);
+		root->addWidget(status_section);
 
-		auto *device_group = new QGroupBox(obs_module_text("dock.device"), content);
-		device_form = new QFormLayout(device_group);
-		connect_box = new QCheckBox(obs_module_text("connect_enabled"), device_group);
-		ip_edit = new QLineEdit(device_group);
-		port_spin = new NoWheelSpinBox(device_group);
-		port_spin->setRange(1, 65535);
-		brightness_spin = new NoWheelDoubleSpinBox(device_group);
+		// Model-specific hardware controls; the rows follow the
+		// detected device and the whole section hides when none apply.
+		auto *device_body = new QWidget(content);
+		device_form = new QFormLayout(device_body);
+		device_form->setContentsMargins(16, 0, 0, 4);
+		brightness_spin = new NoWheelDoubleSpinBox(device_body);
 		brightness_spin->setRange(0.0, 20.0);
 		brightness_spin->setDecimals(0);
 		brightness_spin->setSingleStep(1.0);
-		device_form->addRow(QString(), connect_box);
-		device_form->addRow(obs_module_text("ip"), ip_edit);
-		device_form->addRow(obs_module_text("port"), port_spin);
-		brightness_row = make_double_slider(device_group, brightness_spin,
+		brightness_row = make_double_slider(device_body, brightness_spin,
 						    &brightness_slider,
 						    BRIGHTNESS_SLIDER_SCALE);
 		brightness_row->setToolTip(
@@ -398,93 +510,113 @@ public:
 		device_form->addRow(obs_module_text("brightness"),
 				    brightness_row);
 		autobright_box = new QCheckBox(obs_module_text("autobright"),
-					       device_group);
+					       device_body);
 		autobright_box->setToolTip(
 			obs_module_text("autobright_tooltip"));
-		device_form->addRow(QString(), autobright_box);
-		display_mode_combo = new NoWheelComboBox(device_group);
+		device_form->addRow(autobright_box);
+		display_mode_combo = new NoWheelComboBox(device_body);
 		display_mode_combo->setToolTip(
 			obs_module_text("displaymode_tooltip"));
 		device_form->addRow(obs_module_text("displaymode"),
 				    display_mode_combo);
-		eye_label = new QLabel(device_group);
+		eye_label = new QLabel(device_body);
 		device_form->addRow(obs_module_text("dock.eye"), eye_label);
-		eye_button = new QPushButton(device_group);
+		eye_button = new QPushButton(device_body);
 		eye_button->setToolTip(obs_module_text("dock.eye_tooltip"));
-		device_form->addRow(QString(), eye_button);
-		dist_marker_box = new QCheckBox(
-			obs_module_text("screen_dist_marker"), device_group);
-		dist_marker_box->setToolTip(
-			obs_module_text("screen_dist_marker_tooltip"));
-		device_form->addRow(QString(), dist_marker_box);
-		sbs_combo = new NoWheelComboBox(device_group);
+		device_form->addRow(eye_button);
+		device_section = new DockSection(obs_module_text("dock.device"),
+						 device_body, content);
+		root->addWidget(device_section);
+
+		auto *output_body = new QWidget(content);
+		auto *output_form = new QFormLayout(output_body);
+		output_form->setContentsMargins(16, 0, 0, 4);
+		projector_button = new QPushButton(
+			obs_module_text("dock.open_projector"), output_body);
+		projector_button->setToolTip(
+			obs_module_text("dock.open_projector_tooltip"));
+		output_form->addRow(projector_button);
+		auto_projector_box = new QCheckBox(
+			obs_module_text("dock.auto_projector"), output_body);
+		auto_projector_box->setToolTip(
+			obs_module_text("dock.auto_projector_tooltip"));
+		output_form->addRow(auto_projector_box);
+		sbs_combo = new NoWheelComboBox(output_body);
 		sbs_combo->addItem(obs_module_text("sbs_output.auto"), 0);
 		sbs_combo->addItem(obs_module_text("sbs_output.on"), 1);
 		sbs_combo->addItem(obs_module_text("sbs_output.off"), 2);
 		sbs_combo->setToolTip(obs_module_text("sbs_output_tooltip"));
-		device_form->addRow(obs_module_text("sbs_output"), sbs_combo);
-		projector_button = new QPushButton(
-			obs_module_text("dock.open_projector"), device_group);
-		projector_button->setToolTip(
-			obs_module_text("dock.open_projector_tooltip"));
-		auto_projector_box = new QCheckBox(
-			obs_module_text("dock.auto_projector"), device_group);
-		auto_projector_box->setToolTip(
-			obs_module_text("dock.auto_projector_tooltip"));
-		monitor_combo = new NoWheelComboBox(device_group);
+		output_form->addRow(obs_module_text("sbs_output"), sbs_combo);
+		monitor_combo = new NoWheelComboBox(output_body);
 		monitor_combo->setToolTip(
 			obs_module_text("dock.monitor_out_tooltip"));
+		output_form->addRow(obs_module_text("dock.monitor_out"),
+				    monitor_combo);
 		cursor_fence_box = new QCheckBox(
-			obs_module_text("dock.cursor_fence"), device_group);
+			obs_module_text("dock.cursor_fence"), output_body);
 		cursor_fence_box->setToolTip(
 			obs_module_text("dock.cursor_fence_tooltip"));
-		device_form->addRow(QString(), projector_button);
-		device_form->addRow(QString(), auto_projector_box);
-		device_form->addRow(obs_module_text("dock.monitor_out"),
-				    monitor_combo);
-		device_form->addRow(QString(), cursor_fence_box);
-		root->addWidget(device_group);
+		output_form->addRow(cursor_fence_box);
+		output_section = new DockSection(obs_module_text("dock.output"),
+						 output_body, content);
+		root->addWidget(output_section);
 
-		auto *screen_group = new QGroupBox(obs_module_text("dock.screen"), content);
-		auto *screen_form = new QFormLayout(screen_group);
-		prediction_spin = new NoWheelDoubleSpinBox(screen_group);
+		// Marker-6DoF settings; the section appears only while the Eye
+		// camera is attached with UVC enabled (see refresh()).
+		auto *marker_body = new QWidget(content);
+		auto *marker_form = new QFormLayout(marker_body);
+		marker_form->setContentsMargins(16, 0, 0, 4);
+		dist_marker_box = new QCheckBox(
+			obs_module_text("screen_dist_marker"), marker_body);
+		dist_marker_box->setToolTip(
+			obs_module_text("screen_dist_marker_tooltip"));
+		marker_form->addRow(dist_marker_box);
+		marker_section = new DockSection(obs_module_text("dock.marker"),
+						 marker_body, content);
+		marker_section->setVisible(false);
+		root->addWidget(marker_section);
+
+		auto *screen_body = new QWidget(content);
+		auto *screen_form = new QFormLayout(screen_body);
+		screen_form->setContentsMargins(16, 0, 0, 4);
+		prediction_spin = new NoWheelDoubleSpinBox(screen_body);
 		prediction_spin->setRange(0.0, 50.0);
 		prediction_spin->setDecimals(0);
 		prediction_spin->setSingleStep(1.0);
-		fov_auto_box = new QCheckBox(obs_module_text("fov_auto"), screen_group);
-		fov_spin = new NoWheelDoubleSpinBox(screen_group);
+		fov_auto_box = new QCheckBox(obs_module_text("fov_auto"), screen_body);
+		fov_spin = new NoWheelDoubleSpinBox(screen_body);
 		fov_spin->setRange(20.0, 100.0);
 		fov_spin->setDecimals(0);
 		fov_spin->setSingleStep(1.0);
-		distance_spin = new NoWheelDoubleSpinBox(screen_group);
+		distance_spin = new NoWheelDoubleSpinBox(screen_body);
 		distance_spin->setRange(MIN_SCREEN_DISTANCE_M,
 					MAX_SCREEN_DISTANCE_M);
 		distance_spin->setDecimals(1);
 		distance_spin->setSingleStep(0.1);
-		size_spin = new NoWheelDoubleSpinBox(screen_group);
+		size_spin = new NoWheelDoubleSpinBox(screen_body);
 		// Down to 0.05: the marker distance sync scales the factor
 		// with the distance ratio, and a 4 m -> 0.5 m move needs 1/8.
 		size_spin->setRange(0.05, 4.0);
 		size_spin->setDecimals(2);
 		size_spin->setSingleStep(0.05);
-		curve_spin = new NoWheelDoubleSpinBox(screen_group);
+		curve_spin = new NoWheelDoubleSpinBox(screen_body);
 		curve_spin->setRange(0.0, MAX_SCREEN_CURVE);
 		curve_spin->setDecimals(2);
 		curve_spin->setSingleStep(0.05);
-		ipd_spin = new NoWheelDoubleSpinBox(screen_group);
+		ipd_spin = new NoWheelDoubleSpinBox(screen_body);
 		ipd_spin->setRange(MIN_IPD_MM, MAX_IPD_MM);
 		ipd_spin->setDecimals(1);
 		ipd_spin->setSingleStep(0.5);
-		screen_label = new QLabel(screen_group);
+		screen_label = new QLabel(screen_body);
 		screen_form->addRow(obs_module_text("prediction_ms"),
-				    make_double_slider(screen_group, prediction_spin,
+				    make_double_slider(screen_body, prediction_spin,
 						       &prediction_slider,
 						       PREDICTION_SLIDER_SCALE));
-		screen_form->addRow(QString(), fov_auto_box);
+		screen_form->addRow(fov_auto_box);
 		screen_form->addRow(obs_module_text("fov_deg"),
-				    make_double_slider(screen_group, fov_spin, &fov_slider,
+				    make_double_slider(screen_body, fov_spin, &fov_slider,
 						       FOV_SLIDER_SCALE));
-		auto *distance_row = make_double_slider(screen_group, distance_spin,
+		auto *distance_row = make_double_slider(screen_body, distance_spin,
 							&distance_slider,
 							DISTANCE_SLIDER_SCALE);
 		distance_row->setToolTip(
@@ -492,32 +624,63 @@ public:
 		screen_form->addRow(obs_module_text("screen_distance_m"),
 				    distance_row);
 		screen_form->addRow(obs_module_text("screen_size_factor"),
-				    make_double_slider(screen_group, size_spin, &size_slider,
+				    make_double_slider(screen_body, size_spin, &size_slider,
 						       SIZE_SLIDER_SCALE));
 		screen_form->addRow(obs_module_text("screen_curve"),
-				    make_double_slider(screen_group, curve_spin, &curve_slider,
+				    make_double_slider(screen_body, curve_spin, &curve_slider,
 						       CURVE_SLIDER_SCALE));
-		auto *ipd_row = make_double_slider(screen_group, ipd_spin,
+		auto *ipd_row = make_double_slider(screen_body, ipd_spin,
 						   &ipd_slider, IPD_SLIDER_SCALE);
 		ipd_row->setToolTip(obs_module_text("ipd_tooltip"));
 		screen_form->addRow(obs_module_text("ipd_mm"), ipd_row);
 		screen_form->addRow(obs_module_text("dock.screen_result"), screen_label);
-		root->addWidget(screen_group);
+		screen_section = new DockSection(obs_module_text("dock.screen"),
+						 screen_body, content);
+		root->addWidget(screen_section);
 
-		auto *options_group = new QGroupBox(obs_module_text("dock.options"), content);
-		auto *options_layout = new QVBoxLayout(options_group);
-		mag_yaw_box = new QCheckBox(obs_module_text("mag_yaw"), options_group);
-		debug_box = new QCheckBox(obs_module_text("debug_log"), options_group);
-		// Resets every dock setting; lives at the bottom of the options
-		// group, away from the everyday tracker buttons.
-		auto *reset_defaults =
-			new QPushButton(obs_module_text("reset_defaults"), options_group);
-		options_layout->addWidget(mag_yaw_box);
-		options_layout->addWidget(debug_box);
-		options_layout->addWidget(reset_defaults);
-		root->addWidget(options_group);
+		// Rarely-touched settings, collapsed by default. The One-family
+		// TCP endpoint rows still follow the detected device.
+		auto *advanced_body = new QWidget(content);
+		advanced_form = new QFormLayout(advanced_body);
+		advanced_form->setContentsMargins(16, 0, 0, 4);
+		ip_edit = new QLineEdit(advanced_body);
+		port_spin = new NoWheelSpinBox(advanced_body);
+		port_spin->setRange(1, 65535);
+		advanced_form->addRow(obs_module_text("ip"), ip_edit);
+		advanced_form->addRow(obs_module_text("port"), port_spin);
+		mag_yaw_box = new QCheckBox(obs_module_text("mag_yaw"), advanced_body);
+		debug_box = new QCheckBox(obs_module_text("debug_log"), advanced_body);
+		// Resets every dock setting; lives at the bottom of the
+		// advanced section, away from the everyday tracker buttons.
+		auto *reset_defaults = new QPushButton(
+			obs_module_text("reset_defaults"), advanced_body);
+		advanced_form->addRow(mag_yaw_box);
+		advanced_form->addRow(debug_box);
+		advanced_form->addRow(reset_defaults);
+		advanced_section = new DockSection(
+			obs_module_text("dock.advanced"), advanced_body, content);
+		root->addWidget(advanced_section);
 		root->addStretch();
 		setWidget(content);
+
+		// Collapse-state persistence: header clicks write the bit
+		// mask; refresh() applies external changes (settings load).
+		const auto bind_section = [this](DockSection *s, uint32_t bit) {
+			s->on_toggled = [this, bit](bool open) {
+				uint32_t v = g_device.dock_collapsed.load(
+					std::memory_order_relaxed);
+				v = open ? (v & ~bit) : (v | bit);
+				g_device.dock_collapsed.store(
+					v, std::memory_order_relaxed);
+				last_collapsed_seen = v;
+			};
+		};
+		bind_section(status_section, DOCK_SECTION_STATUS);
+		bind_section(device_section, DOCK_SECTION_DEVICE);
+		bind_section(output_section, DOCK_SECTION_OUTPUT);
+		bind_section(marker_section, DOCK_SECTION_MARKER);
+		bind_section(screen_section, DOCK_SECTION_SCREEN);
+		bind_section(advanced_section, DOCK_SECTION_ADVANCED);
 
 		QObject::connect(connect_box, &QCheckBox::toggled, this,
 				 [](bool checked) { manager_set_connect_enabled(&g_device, checked); });
@@ -813,6 +976,26 @@ private:
 
 	void refresh()
 	{
+		// Apply externally-changed fold state (settings load); user
+		// toggles update last_collapsed_seen themselves.
+		const uint32_t collapsed =
+			g_device.dock_collapsed.load(std::memory_order_relaxed);
+		if (collapsed != last_collapsed_seen) {
+			last_collapsed_seen = collapsed;
+			status_section->set_expanded(
+				!(collapsed & DOCK_SECTION_STATUS));
+			device_section->set_expanded(
+				!(collapsed & DOCK_SECTION_DEVICE));
+			output_section->set_expanded(
+				!(collapsed & DOCK_SECTION_OUTPUT));
+			marker_section->set_expanded(
+				!(collapsed & DOCK_SECTION_MARKER));
+			screen_section->set_expanded(
+				!(collapsed & DOCK_SECTION_SCREEN));
+			advanced_section->set_expanded(
+				!(collapsed & DOCK_SECTION_ADVANCED));
+		}
+
 		const model_id detected = detected_hid_model(&g_device);
 		const bool connected = g_device.connected.load(std::memory_order_relaxed);
 		const bool enabled = g_device.connect_enabled.load(std::memory_order_relaxed);
@@ -849,15 +1032,11 @@ private:
 			obs_module_text(traits_for(transport).name_key));
 		if (static_cast<int>(transport) != last_transport) {
 			last_transport = static_cast<int>(transport);
-			// No detected device means no IMU stream to enable; the
-			// checkbox appears together with the device.
-			device_form->setRowVisible(connect_box,
-						   transport != imu_transport::none);
 			const transport_traits tr = traits_for(transport);
-			device_form->setRowVisible(ip_edit,
-						   tr.uses_network_endpoint);
-			device_form->setRowVisible(port_spin,
-						   tr.uses_network_endpoint);
+			advanced_form->setRowVisible(ip_edit,
+						     tr.uses_network_endpoint);
+			advanced_form->setRowVisible(port_spin,
+						     tr.uses_network_endpoint);
 			device_form->setRowVisible(brightness_row,
 						   tr.display_brightness);
 			device_form->setRowVisible(autobright_box,
@@ -877,7 +1056,10 @@ private:
 						   tr.display_mode_count > 0);
 			device_form->setRowVisible(eye_label, tr.eye_camera);
 			device_form->setRowVisible(eye_button, tr.eye_camera);
-			device_form->setRowVisible(dist_marker_box,
+			// The whole section disappears when the model has no
+			// hardware controls (or nothing is detected).
+			device_section->setVisible(tr.display_brightness ||
+						   tr.display_mode_count > 0 ||
 						   tr.eye_camera);
 		}
 		// Eye camera state: adjustable while the session has the One's
@@ -907,6 +1089,18 @@ private:
 					     : "dock.eye.enable"));
 			eye_button->setEnabled(eye_present == 1 &&
 					       eye_uvc >= 0 && !eye_pending);
+			// Marker-6DoF section: shown while tracking is
+			// possible (Eye attached, UVC on). Pending toggles and
+			// unknown states keep the last visibility so the
+			// section does not flicker through the USB
+			// re-enumeration a UVC switch causes.
+			if (!traits_for(transport).eye_camera)
+				marker_section_on = false;
+			else if (!eye_pending && eye_present >= 0 &&
+				 eye_uvc >= 0)
+				marker_section_on = eye_present == 1 &&
+						    eye_uvc == 1;
+			marker_section->setVisible(marker_section_on);
 		}
 		// The display-mode row is adjustable while the session has the
 		// device's command channel open (-1 = unknown/unavailable).
@@ -967,6 +1161,30 @@ private:
 					      : obs_module_text("dock.pose.calibrating");
 		}
 		pose_label->setText(pose_status);
+		// Collapsed-status summary: green = tracking (calibrated),
+		// yellow = connecting/calibrating, red = no device or follow
+		// off. The tooltip carries the textual state so the color is
+		// never the only signal.
+		{
+			const char *light = "#d9534f";
+			if (enabled && detected != MODEL_UNKNOWN)
+				light = (connected && p.connected &&
+					 p.calibrated)
+						? "#5cb85c"
+						: "#f0ad4e";
+			const QString model_name =
+				detected == MODEL_UNKNOWN
+					? QString::fromUtf8(obs_module_text(
+						  "detected_device.none"))
+					: QString::fromStdString(
+						  profile_for(detected).name);
+			status_section->set_summary(
+				QStringLiteral(
+					"<span style=\"color:%1;\">●</span> %2")
+					.arg(QString::fromLatin1(light),
+					     model_name.toHtmlEscaped()),
+				QString::fromUtf8(pose_status));
+		}
 		const int virtual_count =
 			g_device.virtual_source_count.load(std::memory_order_relaxed);
 		virtual_label->setText(QString::number(virtual_count));
@@ -1256,6 +1474,17 @@ private:
 	QLabel *screen_label = nullptr;
 	QCheckBox *connect_box = nullptr;
 	QFormLayout *device_form = nullptr;
+	QFormLayout *advanced_form = nullptr;
+	DockSection *status_section = nullptr;
+	DockSection *device_section = nullptr;
+	DockSection *output_section = nullptr;
+	DockSection *marker_section = nullptr;
+	DockSection *screen_section = nullptr;
+	DockSection *advanced_section = nullptr;
+	// Marker section visibility, held through UVC toggles (see refresh).
+	bool marker_section_on = false;
+	// Last dock_collapsed mask seen, to detect settings loads.
+	uint32_t last_collapsed_seen = UINT32_MAX;
 	QLineEdit *ip_edit = nullptr;
 	QSpinBox *port_spin = nullptr;
 	QDoubleSpinBox *brightness_spin = nullptr;
