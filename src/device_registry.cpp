@@ -137,6 +137,13 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 	const model_profile bt40 = {imu_transport::sensor_api,
 				    MOUNT_X_DEG_MOVERIO, 34.0f, 1920, 1080,
 				    "EPSON MOVERIO BT-40"};
+	// EPSON MOVERIO BT-30C: same Sensor API IMU + serial command port
+	// layout as the BT-40, on a 1280x720 panel with 23 deg diagonal FOV
+	// per the published spec. USB product string "Moverio BT-30C HID-CDC"
+	// (hardware-confirmed 2026-06).
+	const model_profile bt30c = {imu_transport::sensor_api,
+				     MOUNT_X_DEG_MOVERIO, 23.0f, 1280, 720,
+				     "EPSON MOVERIO BT-30C"};
 	// Rokid Max / Air stream fixed 64-byte packets on a vendor HID
 	// interface without any start command. Both share PID 0x162F and are
 	// told apart by the product string containing "Max" (mirrors the
@@ -189,6 +196,7 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 	out.push_back({RAYNEO_VID, 0xAF50, L"", rayneo});
 	out.push_back({RAYNEO_VID, 0x0000, L"RayNeo", rayneo});
 	out.push_back({EPSON_VID, 0x0D12, L"", bt40});
+	out.push_back({EPSON_VID, 0x0C0C, L"", bt30c});
 	out.push_back({ROKID_VID, 0x162F, L"Max", rokid_max});
 	out.push_back({ROKID_VID, 0x162F, L"", rokid_air});
 	out.push_back({ROKID_VID, 0x0000, L"Rokid", rokid_max});
@@ -435,12 +443,18 @@ static void append_builtin_glasses_display_ids(
 	rayneo_name.name_contains = "SmartGlasses";
 	out.push_back(rayneo_name);
 
-	// EPSON MOVERIO BT-40 panel ("EPSON HMD"). SEC is Seiko Epson's PNP id
-	// and is shared with their projectors, so qualify by product code.
-	nyan_real_glasses_display_id moverio;
-	moverio.edid_vendor = nyan_real_pnp_vendor_word("SEC");
-	moverio.edid_product = 0xD004;
-	out.push_back(moverio);
+	// EPSON MOVERIO panels ("EPSON HMD"). SEC is Seiko Epson's PNP id
+	// and is shared with their projectors, so qualify by product code
+	// (BT-40 = 0xD004, BT-30C = 0xD003; both hardware-confirmed).
+	nyan_real_glasses_display_id moverio_bt40;
+	moverio_bt40.edid_vendor = nyan_real_pnp_vendor_word("SEC");
+	moverio_bt40.edid_product = 0xD004;
+	out.push_back(moverio_bt40);
+
+	nyan_real_glasses_display_id moverio_bt30c;
+	moverio_bt30c.edid_vendor = nyan_real_pnp_vendor_word("SEC");
+	moverio_bt30c.edid_product = 0xD003;
+	out.push_back(moverio_bt30c);
 
 	// Rokid panels ("Rokid Max" = LBT 0x4753); match the family by monitor
 	// name to cover other Rokid models on the same vendor id.
