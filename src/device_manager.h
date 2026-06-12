@@ -107,6 +107,11 @@ struct device_manager {
 	// texture's aspect, FOV and size factor). 0 until a virtual screen
 	// renders; the Audio Wall derives exact audio bearings from it.
 	std::atomic<float> screen_half_width_m{0.0f};
+	// Yaw the render path subtracts from the world so the Display Wall's
+	// chosen center display faces forward (degrees, + = the chosen point
+	// was right of the wall center). Published with screen_half_width_m;
+	// the Audio Wall subtracts it so bearings keep matching the picture.
+	std::atomic<float> screen_yaw_offset_deg{0.0f};
 
 	std::mutex settings_mutex;
 	std::string ip = "169.254.2.1";

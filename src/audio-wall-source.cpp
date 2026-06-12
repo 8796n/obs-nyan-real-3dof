@@ -272,6 +272,7 @@ struct audio_wall_engine {
 	float geo_half_w = -1.0f;
 	float geo_dist = -1.0f;
 	float geo_curve = -1.0f;
+	float geo_yaw_off = 0.0f;
 	uint32_t geo_map_gen = 0;
 
 	std::mutex exclude_mutex;
@@ -394,7 +395,10 @@ bool auto_azimuth_deg(float norm_x, double *out_deg)
 		az = std::atan2(radius * std::sin(theta),
 				dist - radius * (1.0 - std::cos(theta)));
 	}
-	*out_deg = az * 180.0 / PI;
+	// The render path turns the world by the center-display yaw; shift
+	// the bearings the same way so audio keeps matching the picture.
+	*out_deg = az * 180.0 / PI -
+		   g_device.screen_yaw_offset_deg.load(std::memory_order_relaxed);
 	return true;
 }
 
@@ -1110,14 +1114,18 @@ void wall_tick(void *data, float)
 			std::memory_order_relaxed);
 		const float curve = g_device.screen_curve.load(
 			std::memory_order_relaxed);
+		const float yaw_off = g_device.screen_yaw_offset_deg.load(
+			std::memory_order_relaxed);
 		const uint32_t gen = nyan_real_wall_map_generation();
 		if (std::fabs(half_w - wall->geo_half_w) > 0.005f ||
 		    std::fabs(dist - wall->geo_dist) > 0.005f ||
 		    std::fabs(curve - wall->geo_curve) > 0.005f ||
+		    std::fabs(yaw_off - wall->geo_yaw_off) > 0.05f ||
 		    gen != wall->geo_map_gen) {
 			wall->geo_half_w = half_w;
 			wall->geo_dist = dist;
 			wall->geo_curve = curve;
+			wall->geo_yaw_off = yaw_off;
 			wall->geo_map_gen = gen;
 			wall->filters_dirty.store(true,
 						  std::memory_order_relaxed);
