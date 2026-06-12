@@ -31,7 +31,7 @@ HID device detection (XREAL / RayNeo / EPSON MOVERIO / Rokid / VITURE / Nreal Li
   -> 表示モード切替 (Air系 / Nreal Light: 2D/3D SBS・リフレッシュレート) + SBS出力描画
   -> OBS 内での仮想スクリーンソース描画
   -> 空間音響フィルター (頭の向きに追従するパン + スクリーン距離減衰)
-  -> Audio Wall ソース (再生中アプリの自動検出 -> 画面位置に応じた空間音響ミックス)
+  -> Display Wall の空間音響 (Audio Wall) グループ (再生中アプリの自動検出 -> 画面位置に応じた空間音響ミックス)
   -> Chrome拡張連携 (タブ音声をWebSocketで直接受信、窓の位置に追従 / tools/chrome-extension)
 ```
 
