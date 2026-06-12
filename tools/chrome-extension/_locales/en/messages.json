@@ -1,0 +1,22 @@
+{
+  "ext_name": {
+    "message": "nyan Real Audio Wall connector",
+    "description": "Extension name (brand, kept identical across locales)."
+  },
+  "ext_desc": {
+    "message": "Sends tab audio and window positions to the nyan Real Audio Wall OBS source over a local WebSocket, so each browser window sounds from where it is on the virtual screen.",
+    "description": "Extension description shown in chrome://extensions and the store listing."
+  },
+  "options_port_label": {
+    "message": "WebSocket port (the same number as \"Browser link port\" in the OBS nyan Real Audio Wall source):"
+  },
+  "options_save": {
+    "message": "Save"
+  },
+  "options_saved": {
+    "message": "Saved"
+  },
+  "options_note": {
+    "message": "Audio from playing tabs is heard only through OBS (the tab itself goes silent)."
+  }
+}
