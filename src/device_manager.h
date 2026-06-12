@@ -113,6 +113,14 @@ struct device_manager {
 	std::atomic<float> screen_curve{DEFAULT_SCREEN_CURVE};
 	// Interpupillary distance for the SBS per-eye parallax (mm).
 	std::atomic<float> ipd_mm{DEFAULT_IPD_MM};
+	// Viewer position offset in the recentered world frame (meters),
+	// accumulated by the remote's gaze dolly ("walk up to what you look
+	// at"). The renderer adds it to the warp ray origin (eye_pos_m), so
+	// the zoom centers on the gazed-at point with true parallax. Runtime
+	// navigation state: never persisted, cleared by recenter/recalibrate.
+	std::atomic<float> viewer_offset_x{0.0f};
+	std::atomic<float> viewer_offset_y{0.0f};
+	std::atomic<float> viewer_offset_z{0.0f};
 	// Physical half width (m) of the virtual screen, published by the
 	// virtual-screen render path every frame (depends on the referenced
 	// texture's aspect, FOV and size factor). 0 until a virtual screen
@@ -174,6 +182,10 @@ void manager_recalibrate(device_manager *f);
 // Steps the screen distance on the shared log scale (SCREEN_DISTANCE_STEP_
 // RATIO per step, clamped to MIN/MAX). Positive = farther. Any thread.
 void manager_step_screen_distance(device_manager *f, double steps);
+// Walks the viewer along the current gaze ray: each step scales the
+// remaining eye-to-screen gap by SCREEN_DISTANCE_STEP_RATIO (positive =
+// retreat), so the zoom centers on the looked-at point. Any thread.
+void manager_dolly_step(device_manager *f, double steps);
 void manager_apply_model_settings(device_manager *f);
 void manager_set_mag_yaw(device_manager *f, bool enabled);
 void manager_set_connect_enabled(device_manager *f, bool enabled);

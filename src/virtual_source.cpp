@@ -641,17 +641,22 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 	// (the head-frame ±IPD/2 lateral offset rotated by the pose). The
 	// screen then converges at screen_distance_m instead of optical
 	// infinity, and gets closer/larger as that distance shrinks. Mono
-	// output keeps the single centered eye.
+	// output keeps the single centered eye. The gaze-dolly viewer offset
+	// (remote-driven head translation) shifts both eyes alike.
 	const double half_ipd_m =
 		sbs ? clampd(g_device.ipd_mm.load(std::memory_order_relaxed),
 			     MIN_IPD_MM, MAX_IPD_MM) *
 			      0.0005
 		    : 0.0;
 	const vec3d eye_right = rotate_vector(q, {half_ipd_m, 0.0, 0.0});
+	const vec3d viewer = {
+		g_device.viewer_offset_x.load(std::memory_order_relaxed),
+		g_device.viewer_offset_y.load(std::memory_order_relaxed),
+		g_device.viewer_offset_z.load(std::memory_order_relaxed)};
 	struct vec3 eye_pos;
-	vec3_set(&eye_pos, static_cast<float>(-eye_right.x),
-		 static_cast<float>(-eye_right.y),
-		 static_cast<float>(-eye_right.z));
+	vec3_set(&eye_pos, static_cast<float>(viewer.x - eye_right.x),
+		 static_cast<float>(viewer.y - eye_right.y),
+		 static_cast<float>(viewer.z - eye_right.z));
 	gs_effect_set_vec3(s->p_eye_pos_m, &eye_pos); // left eye (or mono center)
 
 	const bool previous_srgb = gs_set_linear_srgb(true);
@@ -672,9 +677,10 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 			// Effect parameters set between draws are flushed by
 			// device_draw via gs_effect_update_params, so the
 			// right half picks up the right-eye origin.
-			vec3_set(&eye_pos, static_cast<float>(eye_right.x),
-				 static_cast<float>(eye_right.y),
-				 static_cast<float>(eye_right.z));
+			vec3_set(&eye_pos,
+				 static_cast<float>(viewer.x + eye_right.x),
+				 static_cast<float>(viewer.y + eye_right.y),
+				 static_cast<float>(viewer.z + eye_right.z));
 			gs_effect_set_vec3(s->p_eye_pos_m, &eye_pos);
 			gs_matrix_push();
 			gs_matrix_translate3f(static_cast<float>(eye_w), 0.0f,

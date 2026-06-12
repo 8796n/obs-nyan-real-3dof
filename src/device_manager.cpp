@@ -90,8 +90,18 @@ bool publish_external_pose(device_manager *f, const quatd &device_q,
 	return true;
 }
 
+// Drop the gaze-dolly navigation offset (viewer back to the origin). Runs on
+// every "square up" action: recenter, recalibrate, model change, reset.
+static void clear_viewer_offset(device_manager *f)
+{
+	f->viewer_offset_x.store(0.0f, std::memory_order_relaxed);
+	f->viewer_offset_y.store(0.0f, std::memory_order_relaxed);
+	f->viewer_offset_z.store(0.0f, std::memory_order_relaxed);
+}
+
 static void reset_tracker_for_model_locked(device_manager *f, model_id m)
 {
+	clear_viewer_offset(f);
 	f->tracker.reset();
 	if (m != MODEL_UNKNOWN)
 		f->tracker.set_mount_deg(profile_for(m).mount_x_deg);
@@ -390,6 +400,7 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 
 void manager_recenter(device_manager *f)
 {
+	clear_viewer_offset(f);
 	std::lock_guard<std::mutex> lk(f->state_mutex);
 	f->tracker.recenter();
 	f->pose = f->tracker.snapshot();
@@ -405,6 +416,7 @@ void recenter_hotkey(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
 
 void manager_recalibrate(device_manager *f)
 {
+	clear_viewer_offset(f);
 	std::lock_guard<std::mutex> lk(f->state_mutex);
 	f->tracker.restart_calibration();
 	f->pose = f->tracker.snapshot();
@@ -420,6 +432,64 @@ void manager_step_screen_distance(device_manager *f, double steps)
 				   MAX_SCREEN_DISTANCE_M);
 	f->screen_distance_m.store(static_cast<float>(next),
 				   std::memory_order_relaxed);
+}
+
+void manager_dolly_step(device_manager *f, double steps)
+{
+	pose_snapshot p;
+	{
+		std::lock_guard<std::mutex> lk(f->state_mutex);
+		p = f->pose;
+	}
+	const double d =
+		clampd(f->screen_distance_m.load(std::memory_order_relaxed),
+		       MIN_SCREEN_DISTANCE_M, MAX_SCREEN_DISTANCE_M);
+	vec3d eye = {f->viewer_offset_x.load(std::memory_order_relaxed),
+		     f->viewer_offset_y.load(std::memory_order_relaxed),
+		     f->viewer_offset_z.load(std::memory_order_relaxed)};
+	// Gaze in the same frame the renderer warps in: the head pose
+	// composed with the center-display yaw offset. Without a live pose
+	// (no glasses) fall back to walking straight ahead.
+	vec3d dir = {0.0, 0.0, -1.0};
+	if (p.calibrated && p.connected) {
+		quatd q = p.q;
+		const double yaw_off =
+			f->screen_yaw_offset_deg.load(std::memory_order_relaxed) *
+			PI / 180.0;
+		if (yaw_off != 0.0)
+			q = quat_normalize(
+				quat_multiply(quat_from_yaw_y(-yaw_off), q));
+		dir = rotate_vector(quat_normalize(q), {0.0, 0.0, -1.0});
+	}
+	// Only walk while the gaze actually points at the screen plane
+	// (z = -d); looking past its edges still works on purpose - the
+	// plane is infinite here and the clamps below keep the eye sane.
+	if (dir.z > -1e-3)
+		return;
+	const double gap = (-d - eye.z) / dir.z; // ray length to the plane
+	if (gap <= 0.0)
+		return;
+	// Scale the remaining gap on the shared log ratio: asymptotic
+	// approach that never crosses the screen. The min gap gets a margin
+	// while curved - the cylinder bulges toward the viewer off-center and
+	// this plane-based gap overestimates the surface distance there.
+	const double curve = clampd(
+		f->screen_curve.load(std::memory_order_relaxed), 0.0,
+		MAX_SCREEN_CURVE);
+	const double min_gap = MIN_DOLLY_GAP_M * (1.0 + curve);
+	const double next_gap =
+		clampd(gap * std::pow(SCREEN_DISTANCE_STEP_RATIO, steps),
+		       min_gap, MAX_DOLLY_GAP_M);
+	const double move = gap - next_gap;
+	eye.x = clampd(eye.x + dir.x * move, -MAX_DOLLY_GAP_M, MAX_DOLLY_GAP_M);
+	eye.y = clampd(eye.y + dir.y * move, -MAX_DOLLY_GAP_M, MAX_DOLLY_GAP_M);
+	eye.z = clampd(eye.z + dir.z * move, -MAX_DOLLY_GAP_M, MAX_DOLLY_GAP_M);
+	f->viewer_offset_x.store(static_cast<float>(eye.x),
+				 std::memory_order_relaxed);
+	f->viewer_offset_y.store(static_cast<float>(eye.y),
+				 std::memory_order_relaxed);
+	f->viewer_offset_z.store(static_cast<float>(eye.z),
+				 std::memory_order_relaxed);
 }
 
 void manager_apply_model_settings(device_manager *f)

@@ -43,6 +43,11 @@ constexpr float DEFAULT_OPTICS_FOCUS_M = 4.0f;
 // doubling, ~94 steps across the full 0.1-10 m range). Shared by every
 // step-style entry point (phone remote; a future PC mouse wheel).
 constexpr double SCREEN_DISTANCE_STEP_RATIO = 1.05;
+// Gaze-dolly (viewer translation toward the looked-at point) bounds: the
+// eye keeps at least the min gap to the screen surface (asymptotic, never
+// crosses it) and cannot retreat farther than the max gap.
+constexpr double MIN_DOLLY_GAP_M = 0.15;
+constexpr double MAX_DOLLY_GAP_M = 20.0;
 // Phone-remote input server (LAN WebSocket + served touchpad page). One above
 // the Audio Wall's browser-ingest default so both can run side by side.
 constexpr int DEFAULT_REMOTE_PORT = 8797;
