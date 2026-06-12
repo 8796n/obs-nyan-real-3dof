@@ -461,25 +461,44 @@ void manager_dolly_step(device_manager *f, double steps)
 				quat_multiply(quat_from_yaw_y(-yaw_off), q));
 		dir = rotate_vector(quat_normalize(q), {0.0, 0.0, -1.0});
 	}
-	// Only walk while the gaze actually points at the screen plane
-	// (z = -d); looking past its edges still works on purpose - the
-	// plane is infinite here and the clamps below keep the eye sane.
-	if (dir.z > -1e-3)
-		return;
-	const double gap = (-d - eye.z) / dir.z; // ray length to the plane
-	if (gap <= 0.0)
-		return;
-	// Scale the remaining gap on the shared log ratio: asymptotic
-	// approach that never crosses the screen. The min gap gets a margin
-	// while curved - the cylinder bulges toward the viewer off-center and
-	// this plane-based gap overestimates the surface distance there.
+	// Remaining gap along the gaze to the surface the warp shader
+	// samples. Mirrors the shader's geometry exactly (flat plane at
+	// z = -d, or the cylinder of radius d/curve through (0,0,-d) with
+	// the same far-root choice), so the asymptotic clamp below can
+	// never step through the visible screen.
 	const double curve = clampd(
 		f->screen_curve.load(std::memory_order_relaxed), 0.0,
 		MAX_SCREEN_CURVE);
-	const double min_gap = MIN_DOLLY_GAP_M * (1.0 + curve);
+	double gap = 0.0;
+	if (curve <= 0.0001) {
+		// Only walk while the gaze points at the plane; looking past
+		// its edges still works on purpose (the plane is infinite
+		// here and the clamps keep the eye sane).
+		if (dir.z > -1e-3)
+			return;
+		gap = (-d - eye.z) / dir.z;
+		if (gap <= 0.0)
+			return;
+	} else {
+		const double radius = d / curve;
+		const double center_z = radius - d;
+		const double ox = eye.x;
+		const double oz = eye.z - center_z;
+		const double a = dir.x * dir.x + dir.z * dir.z;
+		const double b = 2.0 * (ox * dir.x + oz * dir.z);
+		const double c = ox * ox + oz * oz - radius * radius;
+		const double disc = b * b - 4.0 * a * c;
+		if (a <= 1e-6 || disc < 0.0)
+			return; // near-vertical gaze, or misses the cylinder
+		gap = (-b + std::sqrt(disc)) / (2.0 * a);
+		if (gap <= 1e-4)
+			return;
+	}
+	// Scale the remaining gap on the shared log ratio: an asymptotic
+	// approach that never reaches the surface.
 	const double next_gap =
 		clampd(gap * std::pow(SCREEN_DISTANCE_STEP_RATIO, steps),
-		       min_gap, MAX_DOLLY_GAP_M);
+		       MIN_DOLLY_GAP_M, MAX_DOLLY_GAP_M);
 	const double move = gap - next_gap;
 	eye.x = clampd(eye.x + dir.x * move, -MAX_DOLLY_GAP_M, MAX_DOLLY_GAP_M);
 	eye.y = clampd(eye.y + dir.y * move, -MAX_DOLLY_GAP_M, MAX_DOLLY_GAP_M);

@@ -629,12 +629,19 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 	const bool sbs = sbs_output_active(s->output_width, s->output_height);
 	const uint32_t eye_w = sbs ? s->output_width / 2 : s->output_width;
 
-	// In SBS the per-eye view keeps the per-eye aspect, so the FOV math
-	// uses the half width.
+	// Full SBS (double-wide frame, e.g. 3840x1080) maps each half 1:1 to
+	// the panel, so the FOV math uses the half width. Half-SBS (manual ON
+	// at a normal aspect, e.g. 1920x1080) is anamorphic: the glasses
+	// stretch each half back to the full panel width, so the optics show
+	// each eye the full output aspect and the FOV math must use the
+	// unsqueezed width - feeding it the half width renders a narrower
+	// view that the stretch then distorts horizontally.
+	const bool half_sbs = sbs && s->output_width < s->output_height * 3;
+	const uint32_t eye_fov_w = half_sbs ? s->output_width : eye_w;
 	const quatd q = set_warp_effect_parameters(
 		s->p_pose_q, s->p_pose_valid, s->p_tan_half_fov,
 		s->p_screen_distance_m, s->p_screen_half_size_m, s->p_screen_curve,
-		s->p_debug_tint, eye_w, s->output_height, source_w, source_h,
+		s->p_debug_tint, eye_fov_w, s->output_height, source_w, source_h,
 		hid_device_ready(&g_device));
 
 	// Per-eye parallax: each eye renders from its own world position
