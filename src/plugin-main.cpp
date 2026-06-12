@@ -23,6 +23,7 @@
 #include "display-wall-source.h"
 #include "dock.h"
 #include "nyan_types.h"
+#include "remote_control.h"
 #include "spatial_audio_filter.h"
 #include "virtual_source.h"
 
@@ -62,6 +63,7 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	shutdown_dock();
+	remote_control_shutdown();
 	if (g_recenter_hotkey_id != OBS_INVALID_HOTKEY_ID)
 		obs_hotkey_unregister(g_recenter_hotkey_id);
 	obs_frontend_remove_save_callback(manager_save_load, nullptr);

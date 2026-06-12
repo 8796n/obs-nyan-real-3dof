@@ -32,6 +32,7 @@ HID device detection (XREAL / RayNeo / EPSON MOVERIO / Rokid / VITURE / Nreal Li
   -> spatial audio filter (head-tracked pan + screen-distance attenuation)
   -> Display Wall's spatial audio (Audio Wall) group (auto-detects playing apps -> spatial mix by window position)
   -> Chrome extension link (tab audio over WebSocket, follows window position / tools/chrome-extension)
+  -> phone remote (scan a QR code on the same Wi-Fi -> touchpad + center/recalibrate/screen-distance remote)
 ```
 
 This is intentionally separate from `obs-near-real3d`: there is no ONNX model,
@@ -277,6 +278,28 @@ the warp from the shared pose and screen state.
 If the glasses' HID interface is not detected, disconnects, or the TCP stream is
 unavailable, the virtual screen passes the texture through without blocking OBS.
 `Center` is also available as an assignable OBS hotkey.
+
+## Phone remote
+
+A remote for driving the PC while wearing the glasses. No app install: any
+phone (Android / iPhone) on the same Wi-Fi works from its browser.
+
+1. In the dock's `Phone remote` section, enable `Accept remote control from a
+   phone`. Choose "Allow access" if Windows Firewall asks on first enable.
+2. Scan the QR code with the phone's camera and use the page that opens
+   (add it to the home screen for a fullscreen, app-like feel).
+
+The page is a touchpad in the middle (1 finger moves, tap = left click,
+2 fingers scroll, 2-finger tap = right click), hold-to-drag left/right click
+buttons at the bottom, `Center` / `Recalibrate` at the top, and a `screen
+distance` wheel strip on the right edge: swipe up to push the screen away,
+swipe down to pull it closer and larger (0.1-10 m, log scale).
+
+Commands are gated by the random token in the URL, so devices that did not
+scan the QR code are rejected. The token and port (default 8797) persist in
+the settings, so a scanned QR keeps working across OBS restarts. Networks
+that isolate clients from each other (hotel Wi-Fi AP isolation) will not
+work; tether the PC to the phone's hotspot instead.
 
 ## Package
 

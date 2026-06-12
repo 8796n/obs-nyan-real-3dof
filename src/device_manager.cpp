@@ -8,6 +8,7 @@
 
 #include "device_registry.h"
 #include "hid_io.h"
+#include "remote_control.h"
 #include "transports/transports.h"
 
 device_manager g_device;
@@ -356,6 +357,20 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 				      : 0;
 	f->sbs_output.store(sbs >= 0 && sbs <= 2 ? static_cast<int>(sbs) : 0,
 			    std::memory_order_relaxed);
+	f->remote_enabled.store(get_bool_setting(settings, "remote_enabled",
+						 false),
+				std::memory_order_relaxed);
+	const int remote_port =
+		get_int_setting(settings, "remote_port", DEFAULT_REMOTE_PORT);
+	f->remote_port.store(remote_port >= 1024 && remote_port <= 65535
+				     ? remote_port
+				     : DEFAULT_REMOTE_PORT,
+			     std::memory_order_relaxed);
+	{
+		std::lock_guard<std::mutex> lk(f->settings_mutex);
+		f->remote_token =
+			obs_data_get_string(settings, "remote_token");
+	}
 	const model_id m = detected_hid_model(f);
 	if (next_fov_auto && m != MODEL_UNKNOWN)
 		f->fov_deg.store(profile_for(m).fov_deg, std::memory_order_relaxed);
@@ -368,6 +383,9 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 	}
 	if (reconnect)
 		f->reconnect_epoch.fetch_add(1, std::memory_order_relaxed);
+	// Bring the phone-remote server up/down promptly on settings loads;
+	// the dock's poll keeps reconciling afterwards.
+	remote_control_sync();
 }
 
 void manager_recenter(device_manager *f)
@@ -391,6 +409,17 @@ void manager_recalibrate(device_manager *f)
 	f->tracker.restart_calibration();
 	f->pose = f->tracker.snapshot();
 	f->pose.connected = f->connected.load(std::memory_order_relaxed);
+}
+
+void manager_step_screen_distance(device_manager *f, double steps)
+{
+	const double cur = f->screen_distance_m.load(std::memory_order_relaxed);
+	const double next = clampd(cur * std::pow(SCREEN_DISTANCE_STEP_RATIO,
+						  steps),
+				   MIN_SCREEN_DISTANCE_M,
+				   MAX_SCREEN_DISTANCE_M);
+	f->screen_distance_m.store(static_cast<float>(next),
+				   std::memory_order_relaxed);
 }
 
 void manager_apply_model_settings(device_manager *f)
@@ -467,6 +496,12 @@ void manager_reset_defaults(device_manager *f)
 	f->dock_collapsed.store(DOCK_COLLAPSED_DEFAULT, std::memory_order_relaxed);
 	f->debug_log.store(false, std::memory_order_relaxed);
 	f->sbs_output.store(0, std::memory_order_relaxed);
+	f->remote_enabled.store(false, std::memory_order_relaxed);
+	f->remote_port.store(DEFAULT_REMOTE_PORT, std::memory_order_relaxed);
+	{
+		std::lock_guard<std::mutex> lk(f->settings_mutex);
+		f->remote_token.clear();
+	}
 
 	const model_id m = detected_hid_model(f);
 	if (m != MODEL_UNKNOWN)
@@ -537,6 +572,17 @@ void manager_save_load(obs_data_t *save_data, bool saving, void *)
 				  g_device.debug_log.load(std::memory_order_relaxed));
 		obs_data_set_int(obj, "sbs_output",
 				 g_device.sbs_output.load(std::memory_order_relaxed));
+		obs_data_set_bool(obj, "remote_enabled",
+				  g_device.remote_enabled.load(
+					  std::memory_order_relaxed));
+		obs_data_set_int(obj, "remote_port",
+				 g_device.remote_port.load(
+					 std::memory_order_relaxed));
+		{
+			std::lock_guard<std::mutex> lk(g_device.settings_mutex);
+			obs_data_set_string(obj, "remote_token",
+					    g_device.remote_token.c_str());
+		}
 		obs_data_set_obj(save_data, key, obj);
 		obs_data_release(obj);
 		return;
