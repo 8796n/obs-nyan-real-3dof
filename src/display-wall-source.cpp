@@ -95,6 +95,9 @@ struct display_wall_source {
 	std::string name_filter;
 	std::string exclude_filter;
 	std::string row_layout;
+	// Monitor id whose center the virtual screen turns toward on recenter
+	// (horizontal only); empty = wall center.
+	std::string center_display;
 	std::string monitor_signature; // topology the last rebuild was built from
 	float refresh_timer_s = 0.0f;
 	float output_sync_timer_s = -1.0f;
@@ -695,10 +698,13 @@ static void add_active_children(display_wall_source *wall)
 static std::mutex g_wall_map_mutex;
 static std::vector<nyan_wall_monitor_map> g_wall_map;
 static std::atomic<uint32_t> g_wall_map_gen{0};
+// Wall texture u of the chosen center display's middle, -1 = auto/none.
+static std::atomic<float> g_wall_center_u{-1.0f};
 
 static void publish_wall_audio_map(display_wall_source *wall)
 {
 	std::vector<nyan_wall_monitor_map> map;
+	float center_u = -1.0f;
 	if (wall->width > 0) {
 		const float w = static_cast<float>(wall->width);
 		for (const wall_child &child : wall->children) {
@@ -712,12 +718,18 @@ static void publish_wall_audio_map(display_wall_source *wall)
 			m.u_right = static_cast<float>(child.x) / w +
 				    static_cast<float>(child.width) / w;
 			map.push_back(m);
+			// A center display that is not part of the wall (or
+			// not connected) stays -1 and behaves like auto.
+			if (!wall->center_display.empty() &&
+			    child.monitor.id == wall->center_display)
+				center_u = 0.5f * (m.u_left + m.u_right);
 		}
 	}
 	{
 		std::lock_guard<std::mutex> lk(g_wall_map_mutex);
 		g_wall_map = std::move(map);
 	}
+	g_wall_center_u.store(center_u, std::memory_order_relaxed);
 	g_wall_map_gen.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -1207,6 +1219,9 @@ static void display_wall_update(void *data, obs_data_t *settings)
 	wall->exclude_filter = exclude_filter ? exclude_filter : "";
 	const char *row_layout = obs_data_get_string(settings, "row_layout");
 	wall->row_layout = row_layout ? row_layout : "";
+	const char *center_display =
+		obs_data_get_string(settings, "center_display");
+	wall->center_display = center_display ? center_display : "";
 	wall->refresh_timer_s = 0.0f;
 
 	rebuild_display_wall(wall);
@@ -1282,6 +1297,7 @@ static void display_wall_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "name_filter", "");
 	obs_data_set_default_string(settings, "exclude_filter", "");
 	obs_data_set_default_string(settings, "row_layout", "");
+	obs_data_set_default_string(settings, "center_display", "");
 	audio_wall_defaults(settings);
 }
 
@@ -1302,6 +1318,40 @@ static bool display_wall_layout_mode_changed(obs_properties_t *props,
 	set_property_visible(props, "columns", mode == layout_mode::auto_columns);
 	set_property_visible(props, "row_layout", mode == layout_mode::rows);
 	set_property_visible(props, "row_align", mode != layout_mode::windows);
+	return true;
+}
+
+// The center-display choices follow the wall's own selection filters, so the
+// glasses display (auto-excluded) and a skipped primary never show up.
+static void populate_center_display_list(
+	obs_property_t *center, const std::vector<monitor_entry> &monitors)
+{
+	obs_property_list_clear(center);
+	obs_property_list_add_string(
+		center, obs_module_text("display_wall.center_auto"), "");
+	for (const monitor_entry &monitor : monitors)
+		obs_property_list_add_string(center, monitor.label.c_str(),
+					     monitor.id.c_str());
+}
+
+// Rebuilds the center-display list when a filter-affecting property changes
+// while the dialog is open (include_primary / exclude_glasses / filters).
+static bool display_wall_selection_changed(obs_properties_t *props,
+					   obs_property_t *,
+					   obs_data_t *settings)
+{
+	obs_property_t *center = obs_properties_get(props, "center_display");
+	if (!center)
+		return false;
+	const std::vector<monitor_entry> all = enumerate_monitors();
+	populate_center_display_list(
+		center,
+		filter_monitors(all,
+				obs_data_get_bool(settings, "include_primary"),
+				obs_data_get_bool(settings, "exclude_glasses"),
+				obs_data_get_string(settings, "name_filter"),
+				obs_data_get_string(settings,
+						    "exclude_filter")));
 	return true;
 }
 
@@ -1365,8 +1415,9 @@ static obs_properties_t *display_wall_properties(void *data)
 			       0, 4096, 1);
 	obs_properties_add_int(props, "padding",
 			       obs_module_text("display_wall.padding"), 0, 4096, 1);
-	obs_properties_add_bool(props, "include_primary",
-				obs_module_text("display_wall.include_primary"));
+	obs_property_t *include_primary_prop = obs_properties_add_bool(
+		props, "include_primary",
+		obs_module_text("display_wall.include_primary"));
 	obs_property_t *exclude_glasses_prop = obs_properties_add_bool(
 		props, "exclude_glasses",
 		obs_module_text("display_wall.exclude_glasses"));
@@ -1394,6 +1445,27 @@ static obs_properties_t *display_wall_properties(void *data)
 				obs_module_text("display_wall.capture_cursor"));
 	obs_properties_add_bool(props, "force_sdr",
 				obs_module_text("display_wall.force_sdr"));
+
+	// Which display the recenter turns toward (horizontal only). The
+	// choices are the wall's own selection (primary/glasses/filters
+	// applied); a choice that later drops out of the wall falls back to
+	// auto in the renderer.
+	obs_property_t *center = obs_properties_add_list(
+		props, "center_display",
+		obs_module_text("display_wall.center_display"),
+		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	populate_center_display_list(center, selected);
+	obs_property_set_long_description(
+		center,
+		wrapped_tooltip("display_wall.center_display_tooltip").c_str());
+	obs_property_set_modified_callback(include_primary_prop,
+					   display_wall_selection_changed);
+	obs_property_set_modified_callback(exclude_glasses_prop,
+					   display_wall_selection_changed);
+	obs_property_set_modified_callback(filter,
+					   display_wall_selection_changed);
+	obs_property_set_modified_callback(exclude,
+					   display_wall_selection_changed);
 
 	audio_wall_add_properties(wall ? wall->audio : nullptr, props);
 
@@ -1528,6 +1600,11 @@ size_t nyan_real_get_wall_monitor_map(nyan_wall_monitor_map *out,
 uint32_t nyan_real_wall_map_generation()
 {
 	return g_wall_map_gen.load(std::memory_order_relaxed);
+}
+
+float nyan_real_wall_center_u()
+{
+	return g_wall_center_u.load(std::memory_order_relaxed);
 }
 
 uint16_t nyan_real_pnp_vendor_word(const char *pnp)

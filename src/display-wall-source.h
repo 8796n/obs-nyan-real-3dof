@@ -60,3 +60,9 @@ size_t nyan_real_get_wall_monitor_map(nyan_wall_monitor_map *out,
 				      size_t max_count);
 // Bumps on every published layout; cheap change detection for callers.
 uint32_t nyan_real_wall_map_generation();
+// Wall texture u (0..1) of the chosen center display's middle, published
+// with the layout. -1 while the choice is "auto" or the chosen display is
+// not part of the wall; the virtual screen then keeps the wall center
+// forward. The render path turns this into the yaw it publishes as
+// g_device.screen_yaw_offset_deg.
+float nyan_real_wall_center_u();

@@ -16,6 +16,7 @@
 
 #include "device_manager.h"
 #include "device_registry.h"
+#include "display-wall-source.h"
 #include "math_util.h"
 #include "nyan_types.h"
 
@@ -204,14 +205,8 @@ static quatd set_warp_effect_parameters(gs_eparam_t *p_pose_q,
 		std::lock_guard<std::mutex> lk(g_device.state_mutex);
 		p = g_device.pose;
 	}
-	const quatd q = predict_pose(
+	quatd q = predict_pose(
 		p, g_device.prediction_ms.load(std::memory_order_relaxed));
-	struct vec4 pose_q;
-	pose_q.x = static_cast<float>(q.w);
-	pose_q.y = static_cast<float>(q.x);
-	pose_q.z = static_cast<float>(q.y);
-	pose_q.w = static_cast<float>(q.z);
-	gs_effect_set_vec4(p_pose_q, &pose_q);
 	gs_effect_set_float(p_pose_valid,
 			    (enable_pose && p.calibrated && p.connected) ? 1.0f
 									 : 0.0f);
@@ -261,6 +256,44 @@ static quatd set_warp_effect_parameters(gs_eparam_t *p_pose_q,
 	// Published for the Audio Wall's geometric bearing computation.
 	g_device.screen_half_width_m.store(screen_half_size_m.x,
 					   std::memory_order_relaxed);
+
+	// Center-display offset: rotate the world so the chosen wall
+	// monitor's center sits straight ahead after a recenter (horizontal
+	// only; vertical placement is untouched). Same flat/cylinder math as
+	// the Audio Wall's bearing solver; the resulting yaw is published so
+	// the Audio Wall can subtract it and keep bearings matching the
+	// picture.
+	double yaw_off = 0.0;
+	const float center_u = nyan_real_wall_center_u();
+	if (center_u >= 0.0f && screen_half_size_m.x > 1e-6f) {
+		const double off = (clampd(center_u, 0.0, 1.0) - 0.5) * 2.0 *
+				   screen_half_size_m.x;
+		if (screen_curve <= 0.0001f) {
+			yaw_off = std::atan2(
+				off, static_cast<double>(screen_distance_m));
+		} else {
+			const double radius = static_cast<double>(
+				screen_distance_m / screen_curve);
+			const double theta = off / radius;
+			yaw_off = std::atan2(
+				radius * std::sin(theta),
+				screen_distance_m -
+					radius * (1.0 - std::cos(theta)));
+		}
+	}
+	g_device.screen_yaw_offset_deg.store(
+		static_cast<float>(yaw_off * 180.0 / PI),
+		std::memory_order_relaxed);
+	if (yaw_off != 0.0)
+		q = quat_normalize(
+			quat_multiply(quat_from_yaw_y(-yaw_off), q));
+	struct vec4 pose_q;
+	pose_q.x = static_cast<float>(q.w);
+	pose_q.y = static_cast<float>(q.x);
+	pose_q.z = static_cast<float>(q.y);
+	pose_q.w = static_cast<float>(q.z);
+	gs_effect_set_vec4(p_pose_q, &pose_q);
+
 	gs_effect_set_vec2(p_tan_half_fov, &tan_half_fov);
 	gs_effect_set_float(p_screen_distance_m, screen_distance_m);
 	gs_effect_set_vec2(p_screen_half_size_m, &screen_half_size_m);
