@@ -6,6 +6,8 @@ deps/gen/
 deps/obs-studio/
 deps/obslib/
 deps/qt/
+# apriltag dependency removed in v0.7; the line keeps stale local clones
+# (setup.ps1 used to create deps/apriltag) out of git status.
 deps/apriltag/
 CMakeUserPresets.json
 *.user

@@ -104,8 +104,6 @@ struct nyan_real_virtual_source {
 	// texrender for each of them only repeats identical work. Reset by
 	// video_tick, set after a successful capture.
 	bool captured_this_frame = false;
-	// Marker-6DoF head position, smoothed to the render rate in tick.
-	vec3d head_smooth;
 	float target_retry_timer_s = 0.0f;
 	uint64_t last_render_log_ns = 0;
 	// GPU profiling state (graphics thread only, active under debug log).
@@ -650,14 +648,10 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 			      0.0005
 		    : 0.0;
 	const vec3d eye_right = rotate_vector(q, {half_ipd_m, 0.0, 0.0});
-	// Marker-6DoF head translation: both eyes shift by the tracked head
-	// position (smoothed into the render rate by video_tick); without a
-	// marker tracker this stays at the origin.
-	const vec3d head = s->head_smooth;
 	struct vec3 eye_pos;
-	vec3_set(&eye_pos, static_cast<float>(head.x - eye_right.x),
-		 static_cast<float>(head.y - eye_right.y),
-		 static_cast<float>(head.z - eye_right.z));
+	vec3_set(&eye_pos, static_cast<float>(-eye_right.x),
+		 static_cast<float>(-eye_right.y),
+		 static_cast<float>(-eye_right.z));
 	gs_effect_set_vec3(s->p_eye_pos_m, &eye_pos); // left eye (or mono center)
 
 	const bool previous_srgb = gs_set_linear_srgb(true);
@@ -678,10 +672,9 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 			// Effect parameters set between draws are flushed by
 			// device_draw via gs_effect_update_params, so the
 			// right half picks up the right-eye origin.
-			vec3_set(&eye_pos,
-				 static_cast<float>(head.x + eye_right.x),
-				 static_cast<float>(head.y + eye_right.y),
-				 static_cast<float>(head.z + eye_right.z));
+			vec3_set(&eye_pos, static_cast<float>(eye_right.x),
+				 static_cast<float>(eye_right.y),
+				 static_cast<float>(eye_right.z));
 			gs_effect_set_vec3(s->p_eye_pos_m, &eye_pos);
 			gs_matrix_push();
 			gs_matrix_translate3f(static_cast<float>(eye_w), 0.0f,
@@ -804,22 +797,6 @@ static void virtual_source_tick(void *data, float seconds)
 	auto *s = static_cast<nyan_real_virtual_source *>(data);
 	if (!s)
 		return;
-	// Smooth the 20-25 Hz marker position into the render rate; without
-	// this the translation steps visibly each camera frame (rotation is
-	// already smooth through the high-rate IMU and prediction).
-	{
-		vec3d head = {};
-		{
-			std::lock_guard<std::mutex> lk(g_device.state_mutex);
-			if (g_device.pose.pos_valid && g_device.pose.connected)
-				head = g_device.pose.pos;
-		}
-		const double a = 1.0 - std::exp(-static_cast<double>(seconds) *
-						2.0 * PI * 4.0);
-		s->head_smooth.x += (head.x - s->head_smooth.x) * a;
-		s->head_smooth.y += (head.y - s->head_smooth.y) * a;
-		s->head_smooth.z += (head.z - s->head_smooth.z) * a;
-	}
 	s->captured_this_frame = false;
 	// GPU probes: this frame writes the other parity slot; what that slot
 	// held (two frames old) is read at the first view render.
