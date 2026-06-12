@@ -341,8 +341,8 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 		std::memory_order_relaxed);
 	f->fov_deg.store(static_cast<float>(get_double_setting(settings, "fov_deg", 50.0)),
 			 std::memory_order_relaxed);
-	const double screen_size_factor =
-		get_double_setting(settings, "screen_size_factor", 1.0);
+	const double screen_size_factor = get_double_setting(
+		settings, "screen_size_factor", DEFAULT_SCREEN_SIZE_FACTOR);
 	f->screen_distance_m.store(
 		static_cast<float>(get_double_setting(settings, "screen_distance_m",
 						      DEFAULT_SCREEN_DISTANCE_M)),
@@ -501,7 +501,8 @@ void manager_reset_defaults(device_manager *f)
 	f->fov_deg.store(50.0f, std::memory_order_relaxed);
 	f->screen_distance_m.store(DEFAULT_SCREEN_DISTANCE_M,
 				   std::memory_order_relaxed);
-	f->screen_size_factor.store(1.0f, std::memory_order_relaxed);
+	f->screen_size_factor.store(DEFAULT_SCREEN_SIZE_FACTOR,
+				    std::memory_order_relaxed);
 	f->screen_curve.store(DEFAULT_SCREEN_CURVE, std::memory_order_relaxed);
 	f->ipd_mm.store(DEFAULT_IPD_MM, std::memory_order_relaxed);
 	f->mag_yaw.store(false, std::memory_order_relaxed);

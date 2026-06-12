@@ -98,7 +98,7 @@ struct device_manager {
 	std::atomic<float> prediction_ms{10.0f};
 	std::atomic<float> fov_deg{50.0f};
 	std::atomic<float> screen_distance_m{DEFAULT_SCREEN_DISTANCE_M};
-	std::atomic<float> screen_size_factor{1.0f};
+	std::atomic<float> screen_size_factor{DEFAULT_SCREEN_SIZE_FACTOR};
 	std::atomic<float> screen_curve{DEFAULT_SCREEN_CURVE};
 	// Interpupillary distance for the SBS per-eye parallax (mm).
 	std::atomic<float> ipd_mm{DEFAULT_IPD_MM};

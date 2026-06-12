@@ -41,9 +41,16 @@
 // selector, since the friendly name is just "UVC Camera N".
 constexpr UINT32 EYE_CAM_W = 512;
 constexpr UINT32 EYE_CAM_H = 378;
-// Focal length calibrated on XREAL 1S + Eye hardware (50 cm tape measure,
-// ~99 deg HFOV).
-constexpr double EYE_CAM_FX = 219.0;
+// Kannala-Brandt intrinsics, calibrated on XREAL 1S + Eye hardware
+// (MyGlasses2.0 test/calibrate-eye-fisheye.py: rms 0.162 px, residuals
+// sub-pixel out to the image corners; validated flat to +2.5 mm/100 px
+// off-axis and -0.8% absolute against a 0.50 m tape measure). The earlier
+// tape-measure-only fx of 219 underestimated scale by ~10%.
+constexpr double EYE_CAM_FX = 238.4941;
+constexpr double EYE_CAM_FY = 238.7309;
+constexpr double EYE_CAM_CX = 252.3826;
+constexpr double EYE_CAM_CY = 189.6232;
+constexpr double EYE_CAM_K[4] = {0.27099476, 0.21130490, 0.0, 0.0};
 
 // Finds and opens the first capture device with a native 512x378 YUY2 mode.
 // Returns null when the Eye UVC is absent or disabled.
@@ -146,25 +153,38 @@ static bool read_gray_frame(IMFSourceReader *reader, std::vector<uint8_t> &gray)
 	return true;
 }
 
-// The Eye tracking camera is a ~99 deg HFOV wide-angle whose projection is
-// far closer to equidistant fisheye (r = f*theta) than to the pinhole model
-// the pose solver assumes (r = f*tan(theta)). Both agree near the center
-// (where fx was calibrated), but at the image edge the uncorrected corners
-// bend the pose estimate and the position swings by tens of centimeters.
-// Map detected points onto the pinhole model before solving.
+// Kannala-Brandt fisheye -> pinhole. The distorted radius in normalized
+// coordinates is r_d = theta*(1 + k1 th^2 + k2 th^4 + k3 th^6 + k4 th^8);
+// solve for theta (Newton, seeded at r_d - converges in a few steps over
+// the whole field) and remap the point onto the r_u = tan(theta) pinhole
+// projection the pose solver assumes.
 static void undistort_point(double *u, double *v)
 {
-	const double dx = *u - EYE_CAM_W / 2.0;
-	const double dy = *v - EYE_CAM_H / 2.0;
-	const double r = std::sqrt(dx * dx + dy * dy);
-	if (r < 1e-6)
+	const double xd = (*u - EYE_CAM_CX) / EYE_CAM_FX;
+	const double yd = (*v - EYE_CAM_CY) / EYE_CAM_FY;
+	const double rd = std::sqrt(xd * xd + yd * yd);
+	if (rd < 1e-9)
 		return;
-	const double theta = r / EYE_CAM_FX;
-	if (theta >= 1.4)
-		return; // ~80 deg off-axis: tan() blows up, leave it alone
-	const double scale = EYE_CAM_FX * std::tan(theta) / r;
-	*u = EYE_CAM_W / 2.0 + dx * scale;
-	*v = EYE_CAM_H / 2.0 + dy * scale;
+	double theta = rd;
+	for (int i = 0; i < 8; ++i) {
+		const double t2 = theta * theta;
+		const double poly =
+			1.0 + t2 * (EYE_CAM_K[0] +
+				    t2 * (EYE_CAM_K[1] +
+					  t2 * (EYE_CAM_K[2] +
+						t2 * EYE_CAM_K[3])));
+		const double dpoly =
+			1.0 + t2 * (3.0 * EYE_CAM_K[0] +
+				    t2 * (5.0 * EYE_CAM_K[1] +
+					  t2 * (7.0 * EYE_CAM_K[2] +
+						t2 * 9.0 * EYE_CAM_K[3])));
+		theta -= (theta * poly - rd) / dpoly;
+	}
+	if (!(theta > 0.0) || theta >= 1.45)
+		return; // beyond ~83 deg off-axis: tan() unusable, leave it
+	const double scale = std::tan(theta) / rd;
+	*u = EYE_CAM_CX + EYE_CAM_FX * xd * scale;
+	*v = EYE_CAM_CY + EYE_CAM_FY * yd * scale;
 }
 
 // Camera position in the tag frame (-R^T t), mapped to the world axis
@@ -186,6 +206,20 @@ static double dist2(const vec3d &a, const vec3d &b)
 {
 	const double dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
 	return dx * dx + dy * dy + dz * dz;
+}
+
+// Euclidean camera-to-tag range. NOT the camera-frame z: the axial depth
+// falls with cos(off-axis angle) when the head rotates, which once led a
+// whole debugging session astray ("z swims when turning" was geometry, not
+// error - see MyGlasses2.0/analysis/18).
+static double tag_range(const apriltag_pose_t &pose)
+{
+	double s = 0.0;
+	for (int r = 0; r < 3; ++r) {
+		const double t = matd_get(pose.t, r, 0);
+		s += t * t;
+	}
+	return std::sqrt(s);
 }
 
 // Tag z-axis (the tag's facing normal) in the head frame: column 2 of the
@@ -318,14 +352,14 @@ void marker_worker_fn(device_manager *f)
 				if (pose1.R && pose1.t) {
 					cand[n_cand] = tag_world_pos(pose1);
 					cand_n[n_cand] = tag_normal_head(pose1);
-					cand_z[n_cand] = matd_get(pose1.t, 2, 0);
+					cand_z[n_cand] = tag_range(pose1);
 					cand_err[n_cand] = err1;
 					n_cand++;
 				}
 				if (pose2.R && pose2.t) {
 					cand[n_cand] = tag_world_pos(pose2);
 					cand_n[n_cand] = tag_normal_head(pose2);
-					cand_z[n_cand] = matd_get(pose2.t, 2, 0);
+					cand_z[n_cand] = tag_range(pose2);
 					cand_err[n_cand] = err2;
 					n_cand++;
 				}
@@ -454,7 +488,7 @@ void marker_worker_fn(device_manager *f)
 								     (acc_sum.z / n)));
 				}
 				blog(LOG_INFO,
-				     "[obs-nyan-real-3dof] marker 6DoF rate %u/%u z=%.3f raw=(%+.3f,%+.3f,%+.3f) head=(%+.3f,%+.3f,%+.3f)m raw_sd=(%.1f,%.1f,%.1f)mm step_max=%.1fmm flips=%u%s",
+				     "[obs-nyan-real-3dof] marker 6DoF rate %u/%u range=%.3f raw=(%+.3f,%+.3f,%+.3f) head=(%+.3f,%+.3f,%+.3f)m raw_sd=(%.1f,%.1f,%.1f)mm step_max=%.1fmm flips=%u%s",
 				     hits, frames, last_z, last_pos.x,
 				     last_pos.y, last_pos.z, head.x, head.y,
 				     head.z, sd.x * 1000.0, sd.y * 1000.0,
