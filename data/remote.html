@@ -76,7 +76,11 @@
       <span class="arrow">▼</span>
     </div>
   </div>
-  <div id="status"><span id="dot"></span><span id="status-text">…</span></div>
+  <!-- Bump the rev when changing this file: the dim corner marker lets a
+       phone verify it got the new page without devtools. Tapping it fires a
+       long test vibration - a bare navigator.vibrate() check, independent of
+       any gesture logic. -->
+  <div id="status"><span id="dot"></span><span id="status-text">…</span><span id="rev" style="margin-left:auto;color:#3c3c44;font-size:10px;">r4</span></div>
   <div id="overlay"></div>
 <script>
 'use strict';
@@ -196,7 +200,7 @@ pad.addEventListener('pointerdown', e => {
           dragging = true;
           send({ t: 'btn', b: 0, d: true });
           pad.classList.add('drag');
-          vibrate(20);
+          vibrate(30);
         }
       }, HOLD_MS);
     }
@@ -233,7 +237,7 @@ function padEnd(e) {
       dragging = false;
       send({ t: 'btn', b: 0, d: false });
       pad.classList.remove('drag');
-      vibrate(8);
+      vibrate(15);
     }, DRAG_LOCK_MS);
   } else {
     const quick = performance.now() - gestureT0 < 300 && travel < 14;
@@ -247,31 +251,49 @@ pad.addEventListener('pointercancel', padEnd);
 function clickTap(b) {
   send({ t: 'btn', b: b, d: true });
   send({ t: 'btn', b: b, d: false });
-  vibrate(8);
+  vibrate(15);
 }
 
-/* Edge strip: vertical drag steps the virtual-screen distance on the
-   plugin's log scale. Up = push the screen away, down = pull it closer. */
-const DIST_PX = 7; // px per distance step (~1.05x each)
+/* Edge strip: vertical drag walks the viewer toward/away from the gazed-at
+   point on the plugin's log scale. Up = back away, down = walk closer.
+   A weak haptic tick every couple of steps gives it a wheel-detent feel. */
+const DIST_PX = 7;       // px per distance step (~1.05x each)
+const DETENT_STEPS = 2;  // steps per haptic tick (~1.1x per click)
 const strip = $('strip');
 const stripPts = new Map();
+let detentAcc = 0, lastDetentMs = 0;
 strip.addEventListener('pointerdown', e => {
   strip.setPointerCapture(e.pointerId);
   stripPts.set(e.pointerId, e.clientY);
+  detentAcc = 0;
 });
 strip.addEventListener('pointermove', e => {
   if (!stripPts.has(e.pointerId)) return;
   const dy = e.clientY - stripPts.get(e.pointerId);
   stripPts.set(e.pointerId, e.clientY);
-  pendDist += -dy / DIST_PX;
+  const steps = -dy / DIST_PX;
+  pendDist += steps;
+  detentAcc += steps;
+  const clicks = Math.floor(Math.abs(detentAcc) / DETENT_STEPS);
+  if (clicks) {
+    detentAcc -= Math.sign(detentAcc) * clicks * DETENT_STEPS;
+    // Rate-limited pulse: every vibrate() call cancels the previous one,
+    // and many phone motors cannot render pulses under ~20 ms at all, so
+    // rapid short per-event calls would silence the ratchet entirely.
+    const now = performance.now();
+    if (now - lastDetentMs >= 50) {
+      lastDetentMs = now;
+      vibrate(20);
+    }
+  }
   flushSoon();
 });
 const stripEnd = e => stripPts.delete(e.pointerId);
 strip.addEventListener('pointerup', stripEnd);
 strip.addEventListener('pointercancel', stripEnd);
 
-$('btn-recenter').addEventListener('click', () => { send({ t: 'recenter' }); vibrate(10); });
-$('btn-recal').addEventListener('click', () => { send({ t: 'recal' }); vibrate(10); });
+$('btn-recenter').addEventListener('click', () => { send({ t: 'recenter' }); vibrate(20); });
+$('btn-recal').addEventListener('click', () => { send({ t: 'recal' }); vibrate(20); });
 
 /* Fullscreen (Android Chrome; iOS Safari hides the button). */
 const fsBtn = $('btn-fs');
@@ -299,6 +321,20 @@ document.addEventListener('visibilitychange', () => {
 lock();
 
 document.addEventListener('contextmenu', e => e.preventDefault());
+/* Suppress the browser's native long-press gesture (its OS haptic at
+   ~500 ms reads as a late, misplaced drag cue). Pointer events still fire;
+   only the derived defaults are dropped. */
+const stopNative = e => e.preventDefault();
+pad.addEventListener('touchstart', stopNative, { passive: false });
+strip.addEventListener('touchstart', stopNative, { passive: false });
+
+/* Vibration self-test: tap the rev marker for one long, unmistakable buzz.
+   If this stays silent, navigator.vibrate is dead in this browser/device
+   (iOS Safari, Brave, or an OS touch-feedback setting). */
+$('rev').addEventListener('click', () => {
+  const ok = navigator.vibrate ? navigator.vibrate(200) : false;
+  $('rev').textContent = (navigator.vibrate ? (ok ? 'vib✓' : 'vib✗') : 'no API') + ' r4';
+});
 </script>
 </body>
 </html>
