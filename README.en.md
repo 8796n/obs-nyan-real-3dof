@@ -304,7 +304,10 @@ put). `Center` also resets your standing position.
 
 Commands are gated by the random token in the URL, so devices that did not
 scan the QR code are rejected. The token and port (default 8797) persist in
-the settings, so a scanned QR keeps working across OBS restarts. Networks
+the settings, so a scanned QR keeps working across OBS restarts. One phone
+controls at a time; the most recently connected device wins. To invalidate
+the token (someone saw your QR), click the QR code, or use the
+`Disconnect & issue a new QR` button while connected. Networks
 that isolate clients from each other (hotel Wi-Fi AP isolation) will not
 work; tether the PC to the phone's hotspot instead.
 

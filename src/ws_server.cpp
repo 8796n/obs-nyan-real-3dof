@@ -204,6 +204,16 @@ struct ws_server::impl {
 		const std::string target = request_target(req);
 		const std::string key = find_header(req, "Sec-WebSocket-Key");
 		std::lock_guard<std::mutex> lk(conn->send_mutex);
+		// Host gate (DNS-rebinding defense) runs before GET or upgrade
+		// handling, so a rejected Host never reaches the static page
+		// or the command channel.
+		if (cb.on_check_host &&
+		    !cb.on_check_host(find_header(req, "Host"))) {
+			send_str(s, "HTTP/1.1 403 Forbidden\r\n"
+				    "Connection: close\r\n"
+				    "Content-Length: 0\r\n\r\n");
+			return false;
+		}
 		if (key.empty()) {
 			// Not an upgrade: serve the static page when the
 			// owner provided one (the phone remote's UI).

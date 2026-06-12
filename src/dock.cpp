@@ -362,6 +362,22 @@ protected:
 	}
 };
 
+// QLabel with a left-click callback (the remote's QR code rotates its token
+// on click). Same no-moc pattern as DockSectionHeader.
+class ClickableLabel final : public QLabel {
+public:
+	using QLabel::QLabel;
+	std::function<void()> on_click;
+
+protected:
+	void mousePressEvent(QMouseEvent *event) override
+	{
+		if (event->button() == Qt::LeftButton && on_click)
+			on_click();
+		QLabel::mousePressEvent(event);
+	}
+};
+
 // Collapsible dock section: a full-width header band (arrow + bold title +
 // optional collapsed-state summary) above a body widget. The gray-overlay
 // band reads as a section divider on dark and light themes alike.
@@ -654,9 +670,11 @@ public:
 		remote_port_spin->setRange(1024, 65535);
 		remote_form->addRow(obs_module_text("dock.remote_port"),
 				    remote_port_spin);
-		remote_qr_label = new QLabel(remote_body);
+		remote_qr_label = new ClickableLabel(remote_body);
 		remote_qr_label->setAlignment(Qt::AlignCenter);
 		remote_qr_label->setVisible(false);
+		remote_qr_label->setCursor(Qt::PointingHandCursor);
+		remote_qr_label->setToolTip(tip("dock.remote_qr_tooltip"));
 		remote_form->addRow(remote_qr_label);
 		remote_url_label = new QLabel(remote_body);
 		remote_url_label->setTextInteractionFlags(
@@ -665,6 +683,12 @@ public:
 		remote_url_label->setWordWrap(true);
 		remote_url_label->setVisible(false);
 		remote_form->addRow(remote_url_label);
+		remote_kick_button = new QPushButton(
+			obs_module_text("dock.remote_kick"), remote_body);
+		remote_kick_button->setToolTip(
+			tip("dock.remote_kick_tooltip"));
+		remote_kick_button->setVisible(false);
+		remote_form->addRow(remote_kick_button);
 		remote_section = new DockSection(
 			obs_module_text("dock.remote"), remote_body, content);
 		root->addWidget(remote_section);
@@ -910,6 +934,19 @@ public:
 					 g_device.remote_port.store(
 						 value,
 						 std::memory_order_relaxed);
+				 });
+		// Both rotation entry points (clicking the QR while waiting,
+		// the disconnect button while connected) are the same token
+		// swap - a plain "kick" would lose to the page's 1.2 s
+		// auto-reconnect, so disconnecting implies a new QR.
+		remote_qr_label->on_click = [this]() {
+			remote_control_rotate_token();
+			refresh();
+		};
+		QObject::connect(remote_kick_button, &QPushButton::clicked,
+				 this, [this]() {
+					 remote_control_rotate_token();
+					 refresh();
 				 });
 		QObject::connect(mag_yaw_box, &QCheckBox::toggled, this,
 				 [](bool checked) { manager_set_mag_yaw(&g_device, checked); });
@@ -1471,6 +1508,18 @@ private:
 		last_remote_url = url;
 		last_remote_enabled = enabled;
 		last_remote_clients = clients;
+		// Collapsed-header summary, mirroring the status section's
+		// traffic light: green = a phone is connected, yellow =
+		// waiting for a scan, red = server failed to start.
+		const auto summarize = [this](const char *light,
+					      const QString &text) {
+			remote_section->set_summary(
+				QStringLiteral(
+					"<span style=\"color:%1;\">●</span> %2")
+					.arg(QString::fromLatin1(light),
+					     text.toHtmlEscaped()),
+				text);
+		};
 		if (clients > 0) {
 			// A phone is connected: the QR has served its purpose,
 			// show the session state instead.
@@ -1480,8 +1529,15 @@ private:
 				obs_module_text("dock.remote_connected"),
 				clients));
 			remote_url_label->setVisible(true);
+			remote_kick_button->setVisible(true);
+			summarize("#5cb85c",
+				  QString::asprintf(
+					  obs_module_text(
+						  "dock.remote_summary_connected"),
+					  clients));
 			return;
 		}
+		remote_kick_button->setVisible(false);
 		if (url.empty()) {
 			remote_qr_label->clear();
 			remote_qr_label->setVisible(false);
@@ -1490,8 +1546,17 @@ private:
 						  "dock.remote_unavailable")
 					: "");
 			remote_url_label->setVisible(enabled);
+			if (enabled)
+				summarize("#d9534f",
+					  QString::fromUtf8(obs_module_text(
+						  "dock.remote_summary_error")));
+			else
+				remote_section->set_summary(QString(),
+							    QString());
 			return;
 		}
+		summarize("#f0ad4e", QString::fromUtf8(obs_module_text(
+					     "dock.remote_summary_waiting")));
 		// Crisp integer-scaled QR with a quiet zone; the white pad
 		// keeps it scannable on dark themes.
 		const qrcodegen::QrCode qr = qrcodegen::QrCode::encodeText(
@@ -1623,8 +1688,9 @@ private:
 	DockSection *advanced_section = nullptr;
 	QCheckBox *remote_enable_box = nullptr;
 	QSpinBox *remote_port_spin = nullptr;
-	QLabel *remote_qr_label = nullptr;
+	ClickableLabel *remote_qr_label = nullptr;
 	QLabel *remote_url_label = nullptr;
+	QPushButton *remote_kick_button = nullptr;
 	// Last QR/URL state rendered, to skip the needless re-encode.
 	std::string last_remote_url;
 	bool last_remote_enabled = false;

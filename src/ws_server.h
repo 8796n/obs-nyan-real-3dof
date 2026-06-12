@@ -32,6 +32,10 @@ struct ws_server_callbacks {
 	// Gate a WebSocket upgrade by its request target (path + query, e.g.
 	// "/ws?t=TOKEN"); false sends 403. Unset = accept all upgrades.
 	std::function<bool(const std::string &target)> on_ws_accept;
+	// Gate every request (GET and upgrade) by its Host header; false sends
+	// 403 before any other handling. Used by the LAN remote to require an
+	// IP-literal Host (a DNS-rebinding defense). Unset = accept any Host.
+	std::function<bool(const std::string &host)> on_check_host;
 };
 
 class ws_server {
