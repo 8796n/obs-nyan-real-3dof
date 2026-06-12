@@ -70,6 +70,16 @@ struct device_manager {
 	std::atomic<int> brightness_request{-1};
 	std::atomic<int> autobright_current{-1};
 	std::atomic<int> autobright_request{-1};
+	// MOVERIO virtual display distance (convergence) over the serial
+	// command port: setdisplaydistance shifts the left/right images
+	// horizontally by -32..256 px (0 = factory 4.6 m; positive = nearer).
+	// current: INT32_MIN = unknown/unavailable (port closed, or the model
+	// lacks the command - profile.display_distance). While convergence_link
+	// is on (dock-driven, persisted), the sensor_api session keeps the
+	// hardware convergence matched to screen_distance_m; turning it off
+	// restores the factory default 0.
+	std::atomic<int> display_distance_current{INT32_MIN};
+	std::atomic<bool> convergence_link{false};
 	// Display mode over the device command channel (air_hid MI_04 binary
 	// protocol / nreal_hid MCU ASCII protocol). Values are the family's
 	// protocol mode values from transport_traits.display_modes.
