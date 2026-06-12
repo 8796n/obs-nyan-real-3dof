@@ -133,10 +133,15 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 				      "RayNeo Air"};
 	// EPSON MOVERIO BT-40 exposes its IMU as standard HID sensor
 	// collections, read through the Windows Sensor API. 34 deg diagonal
-	// FOV per the published spec.
-	const model_profile bt40 = {imu_transport::sensor_api,
-				    MOUNT_X_DEG_MOVERIO, 34.0f, 1920, 1080,
-				    "EPSON MOVERIO BT-40"};
+	// FOV per the published spec. Supports the SDK's setdisplaydistance
+	// convergence command; its zero-shift convergence sits at 4.6 m per
+	// the SDK appendix table, which is taken as the optical focal
+	// distance too (the factory alignment of vergence and accommodation).
+	model_profile bt40 = {imu_transport::sensor_api,
+			      MOUNT_X_DEG_MOVERIO, 34.0f, 1920, 1080,
+			      "EPSON MOVERIO BT-40"};
+	bt40.optics_focus_m = 4.6f;
+	bt40.display_distance = true;
 	// EPSON MOVERIO BT-30C: same Sensor API IMU + serial command port
 	// layout as the BT-40, on a 1280x720 panel with 23 deg diagonal FOV
 	// per the published spec. USB product string "Moverio BT-30C HID-CDC"
@@ -370,6 +375,10 @@ static void append_user_devices(std::vector<device_entry> &out,
 		const double focus = obs_data_get_double(item, "optics_focus_m");
 		if (std::isfinite(focus) && focus >= 0.5 && focus <= 20.0)
 			e.profile.optics_focus_m = static_cast<float>(focus);
+		// Optional MOVERIO setdisplaydistance (convergence) support;
+		// only meaningful on sensor_api devices with the command port.
+		e.profile.display_distance =
+			obs_data_get_bool(item, "display_distance");
 		const char *product = obs_data_get_string(item, "product_contains");
 		if (product && *product) {
 			wchar_t *wproduct = nullptr;

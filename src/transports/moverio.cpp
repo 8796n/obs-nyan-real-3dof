@@ -305,6 +305,62 @@ static int moverio_query_autobright(HANDLE h)
 	return moverio_query_value(h, "getautobright", 1);
 }
 
+// setdisplaydistance value range per the Basic Function SDK: horizontal
+// image shift in pixels, positive pulls the perceived display plane nearer.
+constexpr int DISPLAY_DISTANCE_PX_MIN = -32;
+constexpr int DISPLAY_DISTANCE_PX_MAX = 256;
+// Zero shift = factory convergence at 4.6 m; the SDK appendix step table
+// fits px = K * (1/d - 1/4.6) with K ~= 235 px*m throughout (e.g. its
+// 184 px = 1.00 m, 96 px = 1.60 m, -32 px = 12.32 m rows).
+constexpr double DISPLAY_DISTANCE_DEFAULT_M = 4.6;
+constexpr double DISPLAY_DISTANCE_K_PXM = 235.0;
+
+static int convergence_shift_px(double distance_m)
+{
+	const double d = clampd(distance_m, 0.05, 100.0);
+	const double px = DISPLAY_DISTANCE_K_PXM *
+			  (1.0 / d - 1.0 / DISPLAY_DISTANCE_DEFAULT_M);
+	return static_cast<int>(clampd(std::lround(px),
+				       DISPLAY_DISTANCE_PX_MIN,
+				       DISPLAY_DISTANCE_PX_MAX));
+}
+
+// getdisplaydistance counterpart of moverio_query_value: the value can be
+// negative (-32..256), so scan for a sign or digit instead of a bare digit.
+// INT32_MIN = no parsable reply (BT-30C lacks the command entirely).
+static int moverio_query_display_distance(HANDLE h)
+{
+	char reply[64] = "";
+	if (!moverio_serial_command(h, "getdisplaydistance", reply,
+				    sizeof(reply)))
+		return INT32_MIN;
+	const auto find_number = [](const char *p) -> const char * {
+		for (; *p; ++p) {
+			if (std::isdigit(static_cast<unsigned char>(*p)))
+				return p;
+			if (*p == '-' &&
+			    std::isdigit(static_cast<unsigned char>(p[1])))
+				return p;
+		}
+		return nullptr;
+	};
+	const char *p = find_number(reply);
+	char more[32] = "";
+	if (!p) {
+		DWORD got = 0;
+		if (!ReadFile(h, more, sizeof(more) - 1, &got, nullptr) || !got)
+			return INT32_MIN;
+		more[got] = '\0';
+		p = find_number(more);
+		if (!p)
+			return INT32_MIN;
+	}
+	const int v = std::atoi(p);
+	return (v >= DISPLAY_DISTANCE_PX_MIN && v <= DISPLAY_DISTANCE_PX_MAX)
+		       ? v
+		       : INT32_MIN;
+}
+
 void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch)
 {
 	const model_id m = detected_hid_model(f);
@@ -448,6 +504,19 @@ void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch)
 		     raw);
 	}
 
+	// Virtual display distance (convergence): probe only models whose
+	// profile lists the command (BT-40) - on the BT-30C the query would
+	// just burn its read timeout every session.
+	int dd_applied = INT32_MIN;
+	if (serial != INVALID_HANDLE_VALUE && entry.profile.display_distance)
+		dd_applied = moverio_query_display_distance(serial);
+	f->display_distance_current.store(dd_applied, std::memory_order_relaxed);
+	if (entry.profile.display_distance &&
+	    f->debug_log.load(std::memory_order_relaxed))
+		blog(LOG_INFO,
+		     "[obs-nyan-real-3dof] getdisplaydistance %s (%d px)",
+		     dd_applied != INT32_MIN ? "ok" : "failed", dd_applied);
+
 	uint64_t accel_ft100 = 0;
 	uint64_t mag_ft100 = 0;
 	vec3d a_latest = {};
@@ -455,6 +524,11 @@ void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch)
 	uint32_t seq = 0;
 	uint64_t last_rx_ns = os_gettime_ns();
 	rate_log_state rate_log;
+	// Once the convergence link has been on, its off state pins the
+	// factory default 0 instead of "leave the device alone", so toggling
+	// the link off restores the default even across rate-limited retries.
+	bool dd_hold_default = false;
+	uint64_t last_dd_send_ns = 0;
 
 	while (!f->stop.load(std::memory_order_relaxed) &&
 	       f->connect_enabled.load(std::memory_order_relaxed) &&
@@ -505,6 +579,47 @@ void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch)
 				     "-> reply '%s', getautobright %d, "
 				     "getbright %d",
 				     auto_req, reply, now_auto, now_bright);
+		}
+
+		// Convergence link: while on, keep the hardware display plane
+		// at the dock's screen distance. Writes are rate-limited so
+		// slider drags update live without flooding the command port.
+		if (dd_applied != INT32_MIN) {
+			const bool link = f->convergence_link.load(
+				std::memory_order_relaxed);
+			if (link)
+				dd_hold_default = true;
+			const int target =
+				link ? convergence_shift_px(
+					       f->screen_distance_m.load(
+						       std::memory_order_relaxed))
+				     : (dd_hold_default ? 0 : dd_applied);
+			const uint64_t now = os_gettime_ns();
+			if (target != dd_applied &&
+			    now - last_dd_send_ns > 200000000ULL) {
+				char cmd[48];
+				char reply[32] = "";
+				snprintf(cmd, sizeof(cmd),
+					 "setdisplaydistance %d", target);
+				moverio_serial_command(serial, cmd, reply,
+						       sizeof(reply));
+				// Re-read instead of trusting the reply
+				// framing, like the brightness path.
+				const int now_dd =
+					moverio_query_display_distance(serial);
+				dd_applied = now_dd != INT32_MIN ? now_dd
+								 : target;
+				f->display_distance_current.store(
+					dd_applied, std::memory_order_relaxed);
+				last_dd_send_ns = now;
+				if (f->debug_log.load(
+					    std::memory_order_relaxed))
+					blog(LOG_INFO,
+					     "[obs-nyan-real-3dof] "
+					     "setdisplaydistance %d -> reply "
+					     "'%s', getdisplaydistance %d",
+					     target, reply, now_dd);
+			}
 		}
 
 		// The sensor objects go quiet rather than erroring when the
@@ -579,6 +694,7 @@ void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch)
 		CloseHandle(serial);
 	f->brightness_current.store(-1, std::memory_order_relaxed);
 	f->autobright_current.store(-1, std::memory_order_relaxed);
+	f->display_distance_current.store(INT32_MIN, std::memory_order_relaxed);
 	gyro->Release();
 	accel->Release();
 	if (mag)

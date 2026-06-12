@@ -521,6 +521,11 @@ public:
 		autobright_box->setToolTip(
 			tip("autobright_tooltip"));
 		device_form->addRow(autobright_box);
+		convergence_box = new QCheckBox(
+			obs_module_text("convergence_link"), device_body);
+		convergence_box->setToolTip(
+			tip("convergence_link_tooltip"));
+		device_form->addRow(convergence_box);
 		display_mode_combo = new NoWheelComboBox(device_body);
 		display_mode_combo->setToolTip(
 			tip("displaymode_tooltip"));
@@ -688,6 +693,12 @@ public:
 				 [](bool checked) {
 					 g_device.autobright_request.store(
 						 checked ? 1 : 0,
+						 std::memory_order_relaxed);
+				 });
+		QObject::connect(convergence_box, &QCheckBox::toggled, this,
+				 [](bool checked) {
+					 g_device.convergence_link.store(
+						 checked,
 						 std::memory_order_relaxed);
 				 });
 		// activated fires only on user interaction, so the periodic
@@ -1024,6 +1035,8 @@ private:
 						   tr.display_brightness);
 			device_form->setRowVisible(autobright_box,
 						   tr.display_brightness);
+			device_form->setRowVisible(convergence_box,
+						   tr.display_brightness);
 			// Display-mode choices follow the detected family.
 			{
 				QSignalBlocker block(display_mode_combo);
@@ -1119,6 +1132,17 @@ private:
 		    g_device.brightness_request.load(std::memory_order_relaxed) < 0)
 			set_double_control(brightness_spin, brightness_slider,
 					   BRIGHTNESS_SLIDER_SCALE, brightness);
+		// Convergence link is actionable only while the session has
+		// the command port open on a model with setdisplaydistance
+		// (BT-40; the BT-30C lacks the command and stays grayed out).
+		convergence_box->setEnabled(
+			g_device.display_distance_current.load(
+				std::memory_order_relaxed) != INT32_MIN);
+		{
+			QSignalBlocker block(convergence_box);
+			convergence_box->setChecked(g_device.convergence_link.load(
+				std::memory_order_relaxed));
+		}
 		stream_label->setText(!enabled ? obs_module_text("dock.stream.disabled")
 					       : (connected
 							  ? obs_module_text("dock.stream.connected")
@@ -1469,6 +1493,7 @@ private:
 	QSlider *brightness_slider = nullptr;
 	QWidget *brightness_row = nullptr;
 	QCheckBox *autobright_box = nullptr;
+	QCheckBox *convergence_box = nullptr;
 	QComboBox *display_mode_combo = nullptr;
 	QLabel *eye_label = nullptr;
 	QPushButton *eye_button = nullptr;

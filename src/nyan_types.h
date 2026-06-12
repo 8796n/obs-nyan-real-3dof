@@ -100,6 +100,11 @@ struct model_profile {
 	// screen distance to it minimizes vergence-accommodation conflict.
 	// Read through optics_focus() for the fallback.
 	float optics_focus_m = 0.0f;
+	// Device accepts the MOVERIO "setdisplaydistance" serial command
+	// (horizontal per-eye image shift that moves the perceived display
+	// plane). True for the BT-40; the SDK appendix lists the BT-35E/30E
+	// and BT-30C as unsupported.
+	bool display_distance = false;
 	float optics_focus() const
 	{
 		return optics_focus_m > 0.0f ? optics_focus_m
