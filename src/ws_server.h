@@ -50,6 +50,10 @@ public:
 	// false when the connection is gone. Safe against the connection's
 	// own control-frame sends.
 	bool send_text(uint64_t conn, const std::string &text);
+	// Asks one connection to tear down (server-side idle eviction): shuts
+	// the socket down so the frame loop unblocks and runs the normal
+	// teardown (on_close fires from the connection's own thread).
+	void close_conn(uint64_t conn);
 
 private:
 	struct impl;

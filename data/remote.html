@@ -9,6 +9,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="nyan Remote">
 <meta name="theme-color" content="#141417">
 <title>nyan Real 3DoF Remote</title>
 <style>
@@ -30,7 +33,7 @@
     font-size: 15px; padding: 12px 8px;
     touch-action: none;
   }
-  button:active, button.held { background: #3c3c48; }
+  button:active { background: #3c3c48; }
   #top button { flex: 1; }
   #status { display: flex; align-items: center; gap: 6px; padding: 0 4px; font-size: 12px; color: #8a8a94; }
   #dot { width: 9px; height: 9px; border-radius: 50%; background: #c0463f; flex: none; }
@@ -42,6 +45,7 @@
     color: #4c4c56; font-size: 13px; text-align: center; line-height: 1.7;
     touch-action: none;
   }
+  #pad.drag { border-color: #4caf50; }
   #strip {
     width: 64px; border: 1px solid #2c3340; border-radius: 14px; background: #1b2027;
     display: flex; flex-direction: column; align-items: center; justify-content: space-between;
@@ -51,9 +55,6 @@
   #strip .arrow { font-size: 16px; color: #55607a; }
   #dist-box { display: flex; flex-direction: column; align-items: center; gap: 4px; }
   #dist { font-size: 14px; color: #aab6cc; font-variant-numeric: tabular-nums; }
-  #bottom button { padding: 16px 8px; }
-  #btn-left { flex: 2; }
-  #btn-right { flex: 1; }
   #overlay {
     position: absolute; inset: 0; background: #141417;
     display: none; align-items: center; justify-content: center;
@@ -75,10 +76,6 @@
       <span class="arrow">▼</span>
     </div>
   </div>
-  <div id="bottom" class="row">
-    <button id="btn-left">左クリック</button>
-    <button id="btn-right">右クリック</button>
-  </div>
   <div id="status"><span id="dot"></span><span id="status-text">…</span></div>
   <div id="overlay"></div>
 <script>
@@ -86,22 +83,20 @@
 const $ = id => document.getElementById(id);
 const jp = (navigator.language || '').toLowerCase().startsWith('ja');
 const L = jp ? {
-  recenter: 'センター', recal: '再較正', left: '左クリック', right: '右クリック',
+  recenter: 'センター', recal: '再較正',
   pad: 'タッチパッド',
-  hint: '1本指: 移動 ・ タップ: 左クリック<br>2本指: スクロール ・ 2本指タップ: 右クリック',
+  hint: '1本指: 移動 ・ タップ: 左クリック<br>長押し: ドラッグ (指を離しても一瞬なら継続)<br>2本指: スクロール ・ 2本指タップ: 右クリック',
   distLabel: '距離', conn: '接続中', disc: '再接続中…',
   noToken: 'アクセストークンがありません。<br>OBS の nyan Real 3DoF ドックに表示される QR コードからこのページを開いてください。',
 } : {
-  recenter: 'Center', recal: 'Recalibrate', left: 'Left click', right: 'Right click',
+  recenter: 'Center', recal: 'Recalibrate',
   pad: 'Touchpad',
-  hint: '1 finger: move / tap: left click<br>2 fingers: scroll / 2-finger tap: right click',
+  hint: '1 finger: move / tap: left click<br>hold: drag (brief lifts keep it going)<br>2 fingers: scroll / 2-finger tap: right click',
   distLabel: 'Distance', conn: 'Connected', disc: 'Reconnecting…',
   noToken: 'Missing access token.<br>Open this page from the QR code shown in the nyan Real 3DoF dock in OBS.',
 };
 $('btn-recenter').textContent = L.recenter;
 $('btn-recal').textContent = L.recal;
-$('btn-left').textContent = L.left;
-$('btn-right').textContent = L.right;
 $('pad-title').textContent = L.pad;
 $('pad-hint').innerHTML = L.hint;
 $('dist-label').textContent = L.distLabel;
@@ -115,16 +110,22 @@ if (!token) {
 
 const vibrate = ms => { if (navigator.vibrate) navigator.vibrate(ms); };
 
-let ws = null, wsOpen = false;
+let ws = null, wsOpen = false, reconnectTimer = 0;
 function setStatus(on) {
   $('dot').className = on ? 'on' : '';
   $('status-text').textContent = on ? L.conn : L.disc;
 }
 function connect() {
   if (!token) return;
+  if (ws && ws.readyState <= 1) return; // CONNECTING or OPEN already
+  clearTimeout(reconnectTimer);
   ws = new WebSocket('ws://' + location.host + '/ws?t=' + encodeURIComponent(token));
   ws.onopen = () => { wsOpen = true; setStatus(true); };
-  ws.onclose = () => { wsOpen = false; setStatus(false); setTimeout(connect, 1200); };
+  ws.onclose = () => {
+    wsOpen = false; setStatus(false);
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, 1200);
+  };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
   ws.onmessage = ev => {
     try {
@@ -139,6 +140,10 @@ function send(obj) {
 }
 setStatus(false);
 connect();
+/* Liveness heartbeat: lets the plugin evict this session ~12 s after the
+   screen locks or Wi-Fi drops (its dock then shows the QR code again).
+   Background tabs throttle timers, which is exactly the signal we want. */
+setInterval(() => send({ t: 'hb' }), 4000);
 
 /* Outbound events are coalesced per animation frame so a fast drag becomes
    one WS message per display refresh instead of one per touch event. */
@@ -163,17 +168,42 @@ function flushSoon() {
   });
 }
 
-/* Touchpad: 1-finger move, tap = left click, 2-finger vertical = wheel,
-   2-finger tap = right click. */
+/* Touchpad: 1-finger move, tap = left click, press-and-hold = drag (left
+   button held; a brief lift and re-touch continues the drag, so long drags
+   can be done in strokes), 2-finger vertical = wheel, 2-finger tap = right
+   click. */
 const SENS = 1.7;          // touchpad px -> cursor px
 const WHEEL_PX = 60;       // 2-finger px per wheel notch
+const HOLD_MS = 350;       // stationary press before a drag starts
+const HOLD_TRAVEL = 12;    // px of movement that cancels the hold
+const DRAG_LOCK_MS = 250;  // lift shorter than this keeps the drag held
 const pad = $('pad');
 const fingers = new Map();
 let maxFingers = 0, gestureT0 = 0, travel = 0;
+let holdTimer = 0, dragging = false, dragReleaseTimer = 0;
 pad.addEventListener('pointerdown', e => {
   pad.setPointerCapture(e.pointerId);
   fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  if (fingers.size === 1) { gestureT0 = performance.now(); travel = 0; maxFingers = 0; }
+  if (fingers.size === 1) {
+    gestureT0 = performance.now(); travel = 0; maxFingers = 0;
+    if (dragging) {
+      // Re-touch inside the release window: same drag, next stroke.
+      clearTimeout(dragReleaseTimer);
+    } else {
+      clearTimeout(holdTimer);
+      holdTimer = setTimeout(() => {
+        if (fingers.size === 1 && travel < HOLD_TRAVEL && !dragging) {
+          dragging = true;
+          send({ t: 'btn', b: 0, d: true });
+          pad.classList.add('drag');
+          vibrate(20);
+        }
+      }, HOLD_MS);
+    }
+  } else {
+    // A second finger means a 2-finger gesture, not a hold.
+    clearTimeout(holdTimer);
+  }
   maxFingers = Math.max(maxFingers, fingers.size);
 });
 pad.addEventListener('pointermove', e => {
@@ -185,7 +215,7 @@ pad.addEventListener('pointermove', e => {
   if (fingers.size === 1 && maxFingers === 1) {
     pendDx += dx * SENS;
     pendDy += dy * SENS;
-  } else if (fingers.size === 2) {
+  } else if (fingers.size === 2 && !dragging) {
     // Both fingers report moves; halving keeps the sum at finger speed.
     pendWheel += -(dy * 0.5) / WHEEL_PX;
   }
@@ -194,9 +224,22 @@ pad.addEventListener('pointermove', e => {
 function padEnd(e) {
   if (!fingers.delete(e.pointerId)) return;
   if (fingers.size) return;
-  const quick = performance.now() - gestureT0 < 300 && travel < 14;
-  if (quick && maxFingers === 1) { clickTap(0); }
-  else if (quick && maxFingers === 2) { clickTap(1); }
+  clearTimeout(holdTimer);
+  if (dragging) {
+    // Defer the button release: re-touching within the window continues
+    // the drag (the border stays green until it really ends).
+    clearTimeout(dragReleaseTimer);
+    dragReleaseTimer = setTimeout(() => {
+      dragging = false;
+      send({ t: 'btn', b: 0, d: false });
+      pad.classList.remove('drag');
+      vibrate(8);
+    }, DRAG_LOCK_MS);
+  } else {
+    const quick = performance.now() - gestureT0 < 300 && travel < 14;
+    if (quick && maxFingers === 1) { clickTap(0); }
+    else if (quick && maxFingers === 2) { clickTap(1); }
+  }
   maxFingers = 0;
 }
 pad.addEventListener('pointerup', padEnd);
@@ -227,24 +270,6 @@ const stripEnd = e => stripPts.delete(e.pointerId);
 strip.addEventListener('pointerup', stripEnd);
 strip.addEventListener('pointercancel', stripEnd);
 
-/* Click buttons hold for drags: down on press, up on release. */
-function bindButton(id, b) {
-  const el = $(id);
-  el.addEventListener('pointerdown', e => {
-    el.setPointerCapture(e.pointerId);
-    el.classList.add('held');
-    send({ t: 'btn', b: b, d: true });
-    vibrate(5);
-  });
-  const up = () => {
-    el.classList.remove('held');
-    send({ t: 'btn', b: b, d: false });
-  };
-  el.addEventListener('pointerup', up);
-  el.addEventListener('pointercancel', up);
-}
-bindButton('btn-left', 0);
-bindButton('btn-right', 1);
 $('btn-recenter').addEventListener('click', () => { send({ t: 'recenter' }); vibrate(10); });
 $('btn-recal').addEventListener('click', () => { send({ t: 'recal' }); vibrate(10); });
 
@@ -259,12 +284,18 @@ if (document.documentElement.requestFullscreen) {
   fsBtn.style.display = 'none';
 }
 
-/* Keep the screen awake while the remote is open. */
+/* Keep the screen awake while the remote is open; on return to the
+   foreground re-acquire it and reconnect right away (the plugin evicts
+   idle sessions, so the old socket is usually gone by then). */
 let wakeLock = null;
 async function lock() {
   try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
 }
-document.addEventListener('visibilitychange', () => { if (!document.hidden) lock(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  lock();
+  if (!ws || ws.readyState > 1) connect();
+});
 lock();
 
 document.addEventListener('contextmenu', e => e.preventDefault());
