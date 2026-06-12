@@ -16,5 +16,10 @@ void remote_control_shutdown();
 // URL the phone should open (http://<lan-ip>:<port>/?t=<token>), "" while
 // the server is down or no usable LAN address exists.
 std::string remote_control_url();
+// Revokes the current token and restarts the server with a fresh one: every
+// existing session and previously scanned QR stops working. Should the
+// CSPRNG be unavailable, the server stops instead (fail secure) - the old
+// token dies either way. UI thread.
+void remote_control_rotate_token();
 // Established remote sessions, for the dock's status display.
 int remote_control_client_count();

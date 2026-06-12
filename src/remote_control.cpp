@@ -128,16 +128,24 @@ std::string pick_lan_ipv4()
 	return best;
 }
 
-// 60-bit random token in base32 (URL-safe, no escaping anywhere).
+// 60-bit random token in base32 (URL-safe, no escaping anywhere). Returns ""
+// when the OS CSPRNG is unavailable - the caller must then refuse to start
+// the server rather than fall back to a guessable token (fail secure).
 std::string generate_token()
 {
 	static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 	uint8_t raw[12] = {};
 	HCRYPTPROV prov = 0;
+	bool ok = false;
 	if (CryptAcquireContextW(&prov, nullptr, nullptr, PROV_RSA_FULL,
 				 CRYPT_VERIFYCONTEXT)) {
-		CryptGenRandom(prov, sizeof(raw), raw);
+		ok = CryptGenRandom(prov, sizeof(raw), raw);
 		CryptReleaseContext(prov, 0);
+	}
+	if (!ok) {
+		blog(LOG_WARNING,
+		     "[obs-nyan-real-3dof] remote: CSPRNG unavailable, refusing to start (no secure token)");
+		return "";
 	}
 	std::string token;
 	for (uint8_t b : raw)
@@ -145,6 +153,8 @@ std::string generate_token()
 	return token;
 }
 
+// Returns the persisted token, generating one on first use. May return ""
+// when the CSPRNG is unavailable; the caller treats that as "do not start".
 std::string ensure_token()
 {
 	std::lock_guard<std::mutex> lk(g_device.settings_mutex);
@@ -172,6 +182,32 @@ bool upgrade_target_ok(const std::string &target, const std::string &token)
 		pos = amp + 1;
 	}
 	return false;
+}
+
+// True when host (the Host header value, possibly "1.2.3.4:8797") is a bare
+// IPv4 literal. The QR URL always uses the LAN IP, so legitimate phones pass;
+// a DNS-rebinding attacker reaches us under their domain name, which fails -
+// closing the hole where a malicious site could fetch the page cross-origin.
+bool host_is_ipv4_literal(const std::string &host)
+{
+	const std::string h = host.substr(0, host.find(':')); // drop :port
+	if (h.empty())
+		return false;
+	int octets = 1;
+	int digits = 0;
+	for (char c : h) {
+		if (c == '.') {
+			if (digits == 0)
+				return false; // empty octet ("1..2", ".1")
+			octets++;
+			digits = 0;
+		} else if (c >= '0' && c <= '9') {
+			digits++;
+		} else {
+			return false; // a letter: a hostname, not an IP literal
+		}
+	}
+	return octets == 4 && digits > 0;
 }
 
 std::string load_page()
@@ -361,15 +397,24 @@ void start_server(uint16_t port, const std::string &token)
 	cb.on_ws_accept = [token](const std::string &target) {
 		return upgrade_target_ok(target, token);
 	};
+	cb.on_check_host = host_is_ipv4_literal;
 	cb.on_open = [](uint64_t conn) {
+		// Single-user device: the newest authenticated session wins.
+		// Evicting older sessions here means a half-dead connection
+		// (phone slept mid-session) can never block a fresh scan.
+		std::vector<uint64_t> evict;
 		{
 			std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
+			for (const auto &kv : g_remote.conns)
+				evict.push_back(kv.first);
 			g_remote.conns[conn] = GetTickCount64();
 		}
+		for (uint64_t old : evict)
+			g_remote.server.close_conn(old);
 		g_remote.server.send_text(conn, state_json());
 		blog(LOG_INFO,
-		     "[obs-nyan-real-3dof] remote: client connected (%d active)",
-		     remote_control_client_count());
+		     "[obs-nyan-real-3dof] remote: client connected%s",
+		     evict.empty() ? "" : " (replacing the previous session)");
 	};
 	cb.on_close = [](uint64_t conn) {
 		{
@@ -408,6 +453,17 @@ void remote_control_sync()
 	if (port < 1024 || port > 65535)
 		port = DEFAULT_REMOTE_PORT;
 	const std::string token = ensure_token();
+	// Fail secure: without a real token the upgrade gate would accept any
+	// client, so refuse to run rather than expose the command channel.
+	if (token.empty()) {
+		if (g_remote.server.running()) {
+			g_remote.server.stop();
+			release_held_buttons();
+			std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
+			g_remote.conns.clear();
+		}
+		return;
+	}
 
 	if (!g_remote.server.running() ||
 	    g_remote.server.port() != static_cast<uint16_t>(port) ||
@@ -442,6 +498,23 @@ void remote_control_sync()
 		      g_remote.sent_distance.load(std::memory_order_relaxed)) >
 	    1e-4f)
 		broadcast_state();
+}
+
+void remote_control_rotate_token()
+{
+	// The user's intent is "revoke what is out there", so the old token
+	// dies unconditionally: clear it and let the sync below either
+	// generate a fresh one (normal case) or - with the CSPRNG broken -
+	// take the fail-secure path and stop the server. Either way the
+	// revocation holds; rotation never silently keeps the old token.
+	{
+		std::lock_guard<std::mutex> lk(g_device.settings_mutex);
+		g_device.remote_token.clear();
+	}
+	// Skip the bind-retry throttle: a rotation should kill the running
+	// sessions and show the fresh QR immediately.
+	g_remote.last_start_attempt_ms = 0;
+	remote_control_sync();
 }
 
 void remote_control_shutdown()
