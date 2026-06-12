@@ -292,6 +292,14 @@ struct audio_wall_engine {
 	// rebuild an open properties view (no-op while it is closed).
 	std::atomic<bool> props_dirty{false};
 	bool active_children = false;
+	// Active-state tracking for the "audio silently dropped" warning: OBS
+	// monitoring discards audio of sources with activate_refs == 0, so a
+	// wall that is hidden in every scene (or only shown through a source
+	// projector, which does not activate) plays nothing - while the
+	// capture list still updates and looks perfectly healthy. Seen in the
+	// field; the warning makes the silent state visible.
+	bool last_active = true;
+	bool inactive_warned = false;
 
 	// Browser exes currently streaming over WS; the poll thread excludes
 	// them from app discovery so the same audio is not captured twice.
@@ -1041,6 +1049,13 @@ void wall_add_properties(audio_wall_engine *wall, obs_properties_t *props)
 
 	std::string current = obs_module_text("audiowall.current");
 	if (wall) {
+		// Monitoring silently drops audio of inactive sources; say so
+		// where the user is already looking (the capture list keeps
+		// updating even while nothing can be heard).
+		if (!obs_source_active(wall->context))
+			current = std::string(obs_module_text(
+					      "audiowall.inactive_warn")) +
+				  "\n" + current;
 		const long long mismatch =
 			wall->ws_proto_mismatch.load(std::memory_order_relaxed);
 		if (mismatch >= 0) {
@@ -1100,6 +1115,24 @@ void wall_tick(void *data, float)
 {
 	auto *wall = static_cast<audio_wall_engine *>(data);
 	wall_reconcile(wall);
+	// Monitored audio only plays while the wall is active in the program
+	// output (see last_active above); refresh an open properties dialog
+	// on transitions so the warning appears/disappears live.
+	const bool active = obs_source_active(wall->context);
+	if (active != wall->last_active) {
+		wall->last_active = active;
+		wall->props_dirty.store(true, std::memory_order_relaxed);
+		if (active)
+			wall->inactive_warned = false;
+	}
+	if (!active && !wall->inactive_warned) {
+		std::lock_guard<std::mutex> lk(wall->children_mutex);
+		if (!wall->children.empty() || !wall->ws_streams.empty()) {
+			wall->inactive_warned = true;
+			blog(LOG_WARNING,
+			     "[obs-nyan-real-3dof] audio wall: receiving audio, but the Display Wall source is not active in any scene - OBS monitoring drops the sound silently. Turn the scene item's eye icon on (the virtual screen item referencing it is enough).");
+		}
+	}
 	// Refresh an open properties dialog when the capture list changed
 	// (no-op while it is closed). Change-gated so editing the exclude
 	// field is not disturbed by periodic rebuilds.
