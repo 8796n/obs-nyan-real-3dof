@@ -186,21 +186,30 @@ std::string load_page()
 	return body;
 }
 
+// Depth the phone displays: the base screen distance plus how far the gaze
+// dolly has walked forward (z is negative toward the screen).
+float effective_distance()
+{
+	const float d =
+		g_device.screen_distance_m.load(std::memory_order_relaxed);
+	const float oz =
+		g_device.viewer_offset_z.load(std::memory_order_relaxed);
+	return static_cast<float>(clampd(d + oz, 0.05, MAX_DOLLY_GAP_M));
+}
+
 std::string state_json()
 {
-	const double dist =
-		g_device.screen_distance_m.load(std::memory_order_relaxed);
 	char json[64];
-	snprintf(json, sizeof(json), "{\"t\":\"state\",\"dist\":%.3f}", dist);
+	snprintf(json, sizeof(json), "{\"t\":\"state\",\"dist\":%.3f}",
+		 effective_distance());
 	return json;
 }
 
 void broadcast_state()
 {
 	const std::string json = state_json();
-	g_remote.sent_distance.store(
-		g_device.screen_distance_m.load(std::memory_order_relaxed),
-		std::memory_order_relaxed);
+	g_remote.sent_distance.store(effective_distance(),
+				     std::memory_order_relaxed);
 	std::vector<uint64_t> conns;
 	{
 		std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
@@ -327,7 +336,9 @@ void handle_message(uint64_t conn, obs_data_t *msg)
 	} else if (strcmp(type, "whl") == 0) {
 		inject_wheel(obs_data_get_double(msg, "n"));
 	} else if (strcmp(type, "dist") == 0) {
-		manager_step_screen_distance(
+		// Gaze dolly: walk toward/away from the looked-at point, so
+		// the zoom centers on it instead of the screen center.
+		manager_dolly_step(
 			&g_device,
 			clampd(obs_data_get_double(msg, "s"), -100.0, 100.0));
 		broadcast_state();
@@ -425,12 +436,11 @@ void remote_control_sync()
 			g_remote.server.close_conn(conn);
 	}
 
-	// The dock slider (or a settings load) moved the distance: keep the
-	// phones' readout in sync.
-	const float dist =
-		g_device.screen_distance_m.load(std::memory_order_relaxed);
-	if (std::fabs(dist - g_remote.sent_distance.load(
-				     std::memory_order_relaxed)) > 1e-4f)
+	// The dock slider, a recenter (dolly reset) or a settings load moved
+	// the effective depth: keep the phones' readout in sync.
+	if (std::fabs(effective_distance() -
+		      g_remote.sent_distance.load(std::memory_order_relaxed)) >
+	    1e-4f)
 		broadcast_state();
 }
 

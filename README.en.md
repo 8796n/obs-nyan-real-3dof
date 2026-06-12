@@ -296,9 +296,11 @@ The page is a touchpad in the middle (1 finger moves, tap = left click,
 press and hold to start a drag — the left button stays held while the border
 is green; lifting releases it, but a brief lift and re-touch continues the
 drag, so long drags can be done in strokes — 2 fingers scroll, 2-finger tap =
-right click), `Center` / `Recalibrate` at the top, and a `screen distance`
-wheel strip on the right edge: swipe up to push the screen away, swipe down
-to pull it closer and larger (0.1-10 m, log scale).
+right click), `Center` / `Recalibrate` at the top, and a `distance` wheel
+strip on the right edge: swipe down to walk **toward the point you are
+looking at**, swipe up to back away (the viewpoint moves along your gaze, so
+you can step up to a side display of a wide wall; the screen itself stays
+put). `Center` also resets your standing position.
 
 Commands are gated by the random token in the URL, so devices that did not
 scan the QR code are rejected. The token and port (default 8797) persist in
