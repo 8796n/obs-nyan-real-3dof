@@ -1245,17 +1245,25 @@ private:
 		const int monitor_out =
 			g_device.monitor_out.load(std::memory_order_relaxed);
 		if (monitor_out == MONITOR_OUT_AUTO_GLASSES) {
-			// One auto-switch latch per detected connection. USB
-			// audio can show up later than HID, so retry on every
-			// poll until the endpoint exists.
+			// One auto-switch latch per appearance of the glasses'
+			// audio endpoint. USB audio can show up later than HID
+			// (retry every poll until it exists), and it can also
+			// drop and re-enumerate while HID stays connected
+			// (seen on hardware: the endpoint vanished mid-session
+			// and the monitors died with it - libobs never retries
+			// a lost monitor). The latch therefore re-arms whenever
+			// the endpoint is absent; the re-application on return
+			// rebuilds all monitors.
 			if (detected == MODEL_UNKNOWN) {
 				auto_monitor_applied = false;
-			} else if (!auto_monitor_applied) {
+			} else {
 				const monitoring_device_match m =
 					find_glasses_monitoring_device();
-				if (m.found &&
-				    apply_monitoring_device(m,
-							    "glasses detected"))
+				if (!m.found)
+					auto_monitor_applied = false;
+				else if (!auto_monitor_applied &&
+					 apply_monitoring_device(
+						 m, "glasses detected"))
 					auto_monitor_applied = true;
 			}
 		} else if (monitor_out == MONITOR_OUT_DEVICE) {
