@@ -43,7 +43,7 @@ bool obs_module_load(void)
 
 	register_nyan_real_virtual_source();
 	register_nyan_real_display_wall_source();
-	register_nyan_real_audio_wall_source();
+	register_nyan_real_ws_audio_source();
 	register_nyan_real_spatial_audio_filter();
 
 	g_recenter_hotkey_id = obs_hotkey_register_frontend(

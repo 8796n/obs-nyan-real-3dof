@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 8796n <info@8796.jp>
 
+#include "audio-wall-source.h"
 #include "display-wall-source.h"
 #include "tooltip_util.h"
 
@@ -76,6 +77,9 @@ struct display_wall_source {
 	obs_source_t *context = nullptr;
 	std::vector<wall_child> children;
 	bool active_children = false;
+	// Spatial audio (Audio Wall) engine, alive while the checkable
+	// "audio_wall" property group is on.
+	audio_wall_engine *audio = nullptr;
 
 	layout_mode mode = layout_mode::windows;
 	row_align align = row_align::center;
@@ -1211,6 +1215,19 @@ static void display_wall_update(void *data, obs_data_t *settings)
 		wall->last_synced_height = 0;
 		schedule_output_size_sync(wall);
 	}
+
+	// Spatial audio engine follows the checkable group. The engine's tick
+	// re-activates its children by itself, so no show forwarding is
+	// needed on a mid-session enable.
+	const bool want_audio = obs_data_get_bool(settings, "audio_wall");
+	if (want_audio && !wall->audio)
+		wall->audio = audio_wall_create(wall->context);
+	else if (!want_audio && wall->audio) {
+		audio_wall_destroy(wall->audio);
+		wall->audio = nullptr;
+	}
+	if (wall->audio)
+		audio_wall_update(wall->audio, settings);
 }
 
 static const char *display_wall_get_name(void *)
@@ -1230,6 +1247,8 @@ static void *display_wall_create(obs_data_t *settings, obs_source_t *context)
 static void display_wall_destroy(void *data)
 {
 	auto *wall = static_cast<display_wall_source *>(data);
+	if (wall->audio)
+		audio_wall_destroy(wall->audio);
 	release_children(wall);
 	delete wall;
 }
@@ -1263,6 +1282,7 @@ static void display_wall_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "name_filter", "");
 	obs_data_set_default_string(settings, "exclude_filter", "");
 	obs_data_set_default_string(settings, "row_layout", "");
+	audio_wall_defaults(settings);
 }
 
 static void set_property_visible(obs_properties_t *props, const char *name,
@@ -1375,6 +1395,8 @@ static obs_properties_t *display_wall_properties(void *data)
 	obs_properties_add_bool(props, "force_sdr",
 				obs_module_text("display_wall.force_sdr"));
 
+	audio_wall_add_properties(wall ? wall->audio : nullptr, props);
+
 	if (wall) {
 		obs_data_t *current = obs_source_get_settings(wall->context);
 		display_wall_layout_mode_changed(props, nullptr, current);
@@ -1415,6 +1437,10 @@ static void display_wall_render(void *data, gs_effect_t *)
 static void display_wall_tick(void *data, float seconds)
 {
 	auto *wall = static_cast<display_wall_source *>(data);
+	// Before the refresh-interval early-out: the audio engine reconciles
+	// captures and bearings on every tick.
+	if (wall->audio)
+		audio_wall_tick(wall->audio);
 	if (wall->output_sync_timer_s >= 0.0f) {
 		wall->output_sync_timer_s -= seconds;
 		if (wall->output_sync_timer_s <= 0.0f)
@@ -1447,11 +1473,16 @@ static void display_wall_show(void *data)
 	auto *wall = static_cast<display_wall_source *>(data);
 	rebuild_display_wall(wall);
 	add_active_children(wall);
+	if (wall->audio)
+		audio_wall_show(wall->audio);
 }
 
 static void display_wall_hide(void *data)
 {
-	remove_active_children(static_cast<display_wall_source *>(data));
+	auto *wall = static_cast<display_wall_source *>(data);
+	remove_active_children(wall);
+	if (wall->audio)
+		audio_wall_hide(wall->audio);
 }
 
 static void display_wall_enum_active(void *data,
@@ -1463,6 +1494,8 @@ static void display_wall_enum_active(void *data,
 		if (child.source)
 			enum_callback(wall->context, child.source, param);
 	}
+	if (wall->audio)
+		audio_wall_enum_active(wall->audio, enum_callback, param);
 }
 
 static bool display_wall_audio_render(void *, uint64_t *,

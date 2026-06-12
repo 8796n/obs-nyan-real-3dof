@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 8796n <info@8796.jp>
-// Audio Wall input source: the audio counterpart of the Display Wall. One
-// source that discovers which apps are currently playing audio (WASAPI
-// session enumeration), creates a private application-audio-capture child
-// per app, derives each app's bearing from its window position on the
-// desktop, and attaches a private spatial-audio filter to each child with
-// that bearing. The children monitor directly (the filter's filter_add
-// flips them to monitor-only), so the spatialized apps sum on the
-// monitoring device. A composite source that mixes children itself was
-// rejected: libobs forbids COMPOSITE|AUDIO, and composite audio never
-// reaches the monitoring path (scenes cannot be monitored either) - the
-// glasses listen over monitoring, so per-child monitoring is the channel
-// that actually works.
+// Audio Wall engine: the audio counterpart of the Display Wall, hosted by
+// the Display Wall source as its checkable "spatial audio" property group.
+// It discovers which apps are currently playing audio (WASAPI session
+// enumeration), creates a private application-audio-capture child per app,
+// derives each app's bearing from its window position on the desktop, and
+// attaches a private spatial-audio filter to each child with that bearing.
+// The children monitor directly (the filter's filter_add flips them to
+// monitor-only), so the spatialized apps sum on the monitoring device. A
+// composite source that mixes children itself was rejected: libobs forbids
+// COMPOSITE|AUDIO, and composite audio never reaches the monitoring path
+// (scenes cannot be monitored either) - the glasses listen over monitoring,
+// so per-child monitoring is the channel that actually works. Hosting in
+// the Display Wall (instead of the separate source it once was) ties the
+// bearings to the wall layout they are derived from and leaves one thing to
+// add to a scene.
 #include <obs-module.h>
 #include <media-io/audio-io.h>
 #include <util/platform.h>
@@ -257,7 +260,11 @@ struct ws_stream {
 	uint64_t last_rx_ns = 0;
 };
 
-struct audio_wall_source {
+} // namespace
+
+// Global so the host's opaque audio_wall_engine* matches; only this TU sees
+// the definition (the member types above keep internal linkage).
+struct audio_wall_engine {
 	obs_source_t *context = nullptr;
 	std::atomic<int> mode{SPATIAL_MODE_POINT};
 	std::atomic<bool> distance_gain{true};
@@ -307,6 +314,8 @@ struct audio_wall_source {
 	// Discovery summary last logged, poll thread only.
 	std::string last_discovery_log;
 };
+
+namespace {
 
 // Wall texture coordinate of a physical desktop x position, using the
 // Display Wall's published layout. Positions outside the wall monitors
@@ -391,7 +400,7 @@ bool auto_azimuth_deg(float norm_x, double *out_deg)
 
 // Push the wall settings and a child's bearing into its spatial filter.
 // The filter clamps its bearing UI to +-90, matching spread/2's maximum.
-void update_spatial_filter(audio_wall_source *wall, obs_source_t *filter,
+void update_spatial_filter(audio_wall_engine *wall, obs_source_t *filter,
 			   float norm_x)
 {
 	if (!filter)
@@ -410,12 +419,12 @@ void update_spatial_filter(audio_wall_source *wall, obs_source_t *filter,
 	obs_data_release(settings);
 }
 
-void update_child_filter(audio_wall_source *wall, audio_wall_child *child)
+void update_child_filter(audio_wall_engine *wall, audio_wall_child *child)
 {
 	update_spatial_filter(wall, child->filter, child->norm_x);
 }
 
-bool is_excluded(audio_wall_source *wall, const std::string &exe)
+bool is_excluded(audio_wall_engine *wall, const std::string &exe)
 {
 	for (const char *b : BUILTIN_EXCLUDES) {
 		if (exe == b)
@@ -442,7 +451,7 @@ BOOL CALLBACK collect_child_pids_cb(HWND hwnd, LPARAM param)
 }
 
 // One discovery pass: who plays audio, where their window sits.
-std::vector<desired_app> discover_apps(audio_wall_source *wall)
+std::vector<desired_app> discover_apps(audio_wall_engine *wall)
 {
 	std::vector<desired_app> out;
 	std::vector<std::string> skipped;
@@ -566,7 +575,7 @@ std::vector<desired_app> discover_apps(audio_wall_source *wall)
 	return out;
 }
 
-void poll_thread_fn(audio_wall_source *wall)
+void poll_thread_fn(audio_wall_engine *wall)
 {
 	const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 	std::vector<desired_app> last;
@@ -599,7 +608,7 @@ void poll_thread_fn(audio_wall_source *wall)
 		CoUninitialize();
 }
 
-void wall_remove_active_children(audio_wall_source *wall)
+void wall_remove_active_children(audio_wall_engine *wall)
 {
 	if (!wall->active_children)
 		return;
@@ -616,7 +625,7 @@ void wall_remove_active_children(audio_wall_source *wall)
 	wall->active_children = false;
 }
 
-void wall_add_active_children(audio_wall_source *wall)
+void wall_add_active_children(audio_wall_engine *wall)
 {
 	if (wall->active_children || !obs_source_showing(wall->context))
 		return;
@@ -636,7 +645,7 @@ void wall_add_active_children(audio_wall_source *wall)
 // ---- WebSocket stream handling (runs on the server's conn threads) ---------
 
 // Caller holds children_mutex.
-void rebuild_ws_exes_locked(audio_wall_source *wall)
+void rebuild_ws_exes_locked(audio_wall_engine *wall)
 {
 	std::set<std::string> exes;
 	for (auto &entry : wall->ws_streams) {
@@ -648,7 +657,7 @@ void rebuild_ws_exes_locked(audio_wall_source *wall)
 }
 
 // Caller holds children_mutex.
-void release_ws_stream_locked(audio_wall_source *wall, ws_stream &st)
+void release_ws_stream_locked(audio_wall_engine *wall, ws_stream &st)
 {
 	if (st.source) {
 		if (wall->active_children)
@@ -660,7 +669,7 @@ void release_ws_stream_locked(audio_wall_source *wall, ws_stream &st)
 		obs_source_release(st.filter);
 }
 
-void wall_ws_text(audio_wall_source *wall, uint64_t conn, obs_data_t *msg)
+void wall_ws_text(audio_wall_engine *wall, uint64_t conn, obs_data_t *msg)
 {
 	const char *type = obs_data_get_string(msg, "type");
 	const uint64_t key = (conn << 32) |
@@ -755,7 +764,7 @@ void wall_ws_text(audio_wall_source *wall, uint64_t conn, obs_data_t *msg)
 	rebuild_ws_exes_locked(wall);
 }
 
-void wall_ws_binary(audio_wall_source *wall, uint64_t conn, const uint8_t *data,
+void wall_ws_binary(audio_wall_engine *wall, uint64_t conn, const uint8_t *data,
 		    size_t len)
 {
 	if (len < 4)
@@ -796,7 +805,7 @@ void wall_ws_binary(audio_wall_source *wall, uint64_t conn, const uint8_t *data,
 	obs_source_release(source);
 }
 
-void wall_ws_closed(audio_wall_source *wall, uint64_t conn)
+void wall_ws_closed(audio_wall_engine *wall, uint64_t conn)
 {
 	std::lock_guard<std::mutex> lk(wall->children_mutex);
 	for (auto it = wall->ws_streams.begin();
@@ -814,7 +823,7 @@ void wall_ws_closed(audio_wall_source *wall, uint64_t conn)
 	rebuild_ws_exes_locked(wall);
 }
 
-void start_ws_server(audio_wall_source *wall, uint16_t port)
+void start_ws_server(audio_wall_engine *wall, uint16_t port)
 {
 	ws_server_callbacks cb;
 	cb.on_text = [wall](uint64_t conn, obs_data_t *msg) {
@@ -829,7 +838,7 @@ void start_ws_server(audio_wall_source *wall, uint16_t port)
 
 // Apply the poll thread's desired app list: create captures for new apps,
 // update positions, drop captures of apps that stopped playing.
-void wall_reconcile(audio_wall_source *wall)
+void wall_reconcile(audio_wall_engine *wall)
 {
 	std::vector<desired_app> want;
 	{
@@ -919,14 +928,9 @@ void wall_reconcile(audio_wall_source *wall)
 	}
 }
 
-const char *wall_get_name(void *)
-{
-	return obs_module_text("audiowall.name");
-}
-
 void wall_update(void *data, obs_data_t *settings)
 {
-	auto *wall = static_cast<audio_wall_source *>(data);
+	auto *wall = static_cast<audio_wall_engine *>(data);
 	wall->mode.store(static_cast<int>(obs_data_get_int(settings, "mode")),
 			 std::memory_order_relaxed);
 	wall->distance_gain.store(obs_data_get_bool(settings, "distance_gain"),
@@ -964,19 +968,9 @@ void wall_update(void *data, obs_data_t *settings)
 		start_ws_server(wall, port);
 }
 
-void *wall_create(obs_data_t *settings, obs_source_t *context)
-{
-	auto *wall = new audio_wall_source();
-	wall->context = context;
-	wall_update(wall, settings);
-	wall->poll_thread = std::thread(poll_thread_fn, wall);
-	blog(LOG_INFO, "[obs-nyan-real-3dof] audio wall source created");
-	return wall;
-}
-
 void wall_destroy(void *data)
 {
-	auto *wall = static_cast<audio_wall_source *>(data);
+	auto *wall = static_cast<audio_wall_engine *>(data);
 	// Join the WS connection threads before touching the children they
 	// feed; after stop() no callback can run.
 	wall->ws_server.stop();
@@ -1006,6 +1000,7 @@ void wall_destroy(void *data)
 
 void wall_defaults(obs_data_t *settings)
 {
+	obs_data_set_default_bool(settings, "audio_wall", false);
 	obs_data_set_default_int(settings, "mode", SPATIAL_MODE_POINT);
 	obs_data_set_default_bool(settings, "distance_gain", true);
 	obs_data_set_default_string(settings, "exclude", "");
@@ -1031,11 +1026,12 @@ void ws_audio_destroy(void *data)
 	bfree(data);
 }
 
-obs_properties_t *wall_properties(void *data)
+// Appends the checkable "spatial audio" group; the group bool ("audio_wall")
+// is the engine's enable switch on the hosting Display Wall.
+void wall_add_properties(audio_wall_engine *wall, obs_properties_t *props)
 {
-	auto *wall = static_cast<audio_wall_source *>(data);
-	obs_properties_t *props = obs_properties_create();
-	obs_properties_add_text(props, "audiowall_notice",
+	obs_properties_t *grp = obs_properties_create();
+	obs_properties_add_text(grp, "audiowall_notice",
 				obs_module_text("audiowall.notice"),
 				OBS_TEXT_INFO);
 
@@ -1066,37 +1062,39 @@ obs_properties_t *wall_properties(void *data)
 			}
 		}
 	}
-	obs_properties_add_text(props, "audiowall_current", current.c_str(),
+	obs_properties_add_text(grp, "audiowall_current", current.c_str(),
 				OBS_TEXT_INFO);
 
 	obs_property_t *mode = obs_properties_add_list(
-		props, "mode", obs_module_text("spatial.mode"),
+		grp, "mode", obs_module_text("spatial.mode"),
 		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(mode, obs_module_text("spatial.mode.point"),
 				  SPATIAL_MODE_POINT);
 	obs_property_list_add_int(mode, obs_module_text("spatial.mode.balance"),
 				  SPATIAL_MODE_BALANCE);
 	obs_property_t *dist = obs_properties_add_bool(
-		props, "distance_gain",
+		grp, "distance_gain",
 		obs_module_text("spatial.distance_gain"));
 	obs_property_set_long_description(
 		dist, wrapped_tooltip("spatial.distance_gain_tooltip").c_str());
 	obs_property_t *exclude = obs_properties_add_text(
-		props, "exclude", obs_module_text("audiowall.exclude"),
+		grp, "exclude", obs_module_text("audiowall.exclude"),
 		OBS_TEXT_DEFAULT);
 	obs_property_set_long_description(
 		exclude, wrapped_tooltip("audiowall.exclude_tooltip").c_str());
 	obs_property_t *port = obs_properties_add_int(
-		props, "ws_port", obs_module_text("audiowall.ws_port"), 1024,
+		grp, "ws_port", obs_module_text("audiowall.ws_port"), 1024,
 		65535, 1);
 	obs_property_set_long_description(
 		port, wrapped_tooltip("audiowall.ws_port_tooltip").c_str());
-	return props;
+	obs_properties_add_group(props, "audio_wall",
+				 obs_module_text("audiowall.name"),
+				 OBS_GROUP_CHECKABLE, grp);
 }
 
 void wall_tick(void *data, float)
 {
-	auto *wall = static_cast<audio_wall_source *>(data);
+	auto *wall = static_cast<audio_wall_engine *>(data);
 	wall_reconcile(wall);
 	// Refresh an open properties dialog when the capture list changed
 	// (no-op while it is closed). Change-gated so editing the exclude
@@ -1160,14 +1158,14 @@ void wall_tick(void *data, float)
 
 void wall_show(void *data)
 {
-	auto *wall = static_cast<audio_wall_source *>(data);
+	auto *wall = static_cast<audio_wall_engine *>(data);
 	std::lock_guard<std::mutex> lk(wall->children_mutex);
 	wall_add_active_children(wall);
 }
 
 void wall_hide(void *data)
 {
-	auto *wall = static_cast<audio_wall_source *>(data);
+	auto *wall = static_cast<audio_wall_engine *>(data);
 	std::lock_guard<std::mutex> lk(wall->children_mutex);
 	wall_remove_active_children(wall);
 }
@@ -1175,7 +1173,7 @@ void wall_hide(void *data)
 void wall_enum_active(void *data, obs_source_enum_proc_t enum_callback,
 		      void *param)
 {
-	auto *wall = static_cast<audio_wall_source *>(data);
+	auto *wall = static_cast<audio_wall_engine *>(data);
 	std::lock_guard<std::mutex> lk(wall->children_mutex);
 	for (auto &child : wall->children) {
 		if (child->source)
@@ -1190,7 +1188,7 @@ void wall_enum_active(void *data, obs_source_enum_proc_t enum_callback,
 
 } // namespace
 
-void register_nyan_real_audio_wall_source()
+void register_nyan_real_ws_audio_source()
 {
 	static obs_source_info ws_info = {};
 	ws_info.id = WS_AUDIO_SOURCE_ID;
@@ -1201,25 +1199,61 @@ void register_nyan_real_audio_wall_source()
 	ws_info.create = ws_audio_create;
 	ws_info.destroy = ws_audio_destroy;
 	obs_register_source(&ws_info);
+}
 
-	static obs_source_info info = {};
-	info.id = "nyan_real_3dof_audio_wall";
-	info.type = OBS_SOURCE_TYPE_INPUT;
-	// No AUDIO/VIDEO flags: the wall is a manager. Its private children
-	// capture and monitor the audio themselves; the wall only keeps them
-	// active (enum_active_sources) and feeds their spatial filters.
-	info.output_flags = OBS_SOURCE_DO_NOT_DUPLICATE;
-	info.get_name = wall_get_name;
-	info.create = wall_create;
-	info.destroy = wall_destroy;
-	info.get_defaults = wall_defaults;
-	info.get_properties = wall_properties;
-	info.update = wall_update;
-	info.video_tick = wall_tick;
-	info.show = wall_show;
-	info.hide = wall_hide;
-	info.enum_active_sources = wall_enum_active;
-	info.enum_all_sources = wall_enum_active;
-	info.icon_type = OBS_ICON_TYPE_AUDIO_OUTPUT;
-	obs_register_source(&info);
+// ---- engine API for the hosting Display Wall source ------------------------
+// No AUDIO/VIDEO involvement of its own: the engine is a manager. Its private
+// children capture and monitor the audio themselves; the engine only keeps
+// them active (via the host's enum_active_sources) and feeds their filters.
+
+audio_wall_engine *audio_wall_create(obs_source_t *parent)
+{
+	auto *wall = new audio_wall_engine();
+	wall->context = parent;
+	wall->poll_thread = std::thread(poll_thread_fn, wall);
+	blog(LOG_INFO, "[obs-nyan-real-3dof] audio wall enabled");
+	return wall;
+}
+
+void audio_wall_destroy(audio_wall_engine *engine)
+{
+	wall_destroy(engine);
+	blog(LOG_INFO, "[obs-nyan-real-3dof] audio wall disabled");
+}
+
+void audio_wall_update(audio_wall_engine *engine, obs_data_t *settings)
+{
+	wall_update(engine, settings);
+}
+
+void audio_wall_defaults(obs_data_t *settings)
+{
+	wall_defaults(settings);
+}
+
+void audio_wall_add_properties(audio_wall_engine *engine,
+			       obs_properties_t *props)
+{
+	wall_add_properties(engine, props);
+}
+
+void audio_wall_tick(audio_wall_engine *engine)
+{
+	wall_tick(engine, 0.0f);
+}
+
+void audio_wall_show(audio_wall_engine *engine)
+{
+	wall_show(engine);
+}
+
+void audio_wall_hide(audio_wall_engine *engine)
+{
+	wall_hide(engine);
+}
+
+void audio_wall_enum_active(audio_wall_engine *engine,
+			    obs_source_enum_proc_t enum_callback, void *param)
+{
+	wall_enum_active(engine, enum_callback, param);
 }
