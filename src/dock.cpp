@@ -1448,8 +1448,9 @@ private:
 	}
 
 	// Reconcile the phone-remote server with the dock state, then mirror
-	// the result: a QR code + URL while it runs, a hint while the LAN
-	// address (or the port) is unavailable, nothing while disabled.
+	// the result: a "connected" line while a phone is on, a QR code + URL
+	// while it waits for one, a hint while the LAN address (or the port)
+	// is unavailable, nothing while disabled.
 	void refresh_remote()
 	{
 		remote_control_sync();
@@ -1461,11 +1462,26 @@ private:
 		}
 		set_spin(remote_port_spin,
 			 g_device.remote_port.load(std::memory_order_relaxed));
-		const std::string url = enabled ? remote_control_url() : "";
-		if (url == last_remote_url && enabled == last_remote_enabled)
+		const int clients = enabled ? remote_control_client_count() : 0;
+		const std::string url =
+			(enabled && clients == 0) ? remote_control_url() : "";
+		if (url == last_remote_url && enabled == last_remote_enabled &&
+		    clients == last_remote_clients)
 			return;
 		last_remote_url = url;
 		last_remote_enabled = enabled;
+		last_remote_clients = clients;
+		if (clients > 0) {
+			// A phone is connected: the QR has served its purpose,
+			// show the session state instead.
+			remote_qr_label->clear();
+			remote_qr_label->setVisible(false);
+			remote_url_label->setText(QString::asprintf(
+				obs_module_text("dock.remote_connected"),
+				clients));
+			remote_url_label->setVisible(true);
+			return;
+		}
 		if (url.empty()) {
 			remote_qr_label->clear();
 			remote_qr_label->setVisible(false);
@@ -1612,6 +1628,7 @@ private:
 	// Last QR/URL state rendered, to skip the needless re-encode.
 	std::string last_remote_url;
 	bool last_remote_enabled = false;
+	int last_remote_clients = 0;
 	// Last dock_collapsed mask seen, to detect settings loads.
 	uint32_t last_collapsed_seen = UINT32_MAX;
 	QLineEdit *ip_edit = nullptr;

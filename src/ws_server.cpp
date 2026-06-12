@@ -483,6 +483,21 @@ void ws_server::stop()
 	WSACleanup();
 }
 
+void ws_server::close_conn(uint64_t conn)
+{
+	if (!impl_)
+		return;
+	std::lock_guard<std::mutex> lk(impl_->conns_mutex);
+	for (auto &c : impl_->conns) {
+		if (c->id != conn)
+			continue;
+		std::lock_guard<std::mutex> sk(c->send_mutex);
+		if (c->sock != INVALID_SOCKET)
+			shutdown(c->sock, SD_BOTH);
+		return;
+	}
+}
+
 bool ws_server::send_text(uint64_t conn, const std::string &text)
 {
 	if (!impl_)

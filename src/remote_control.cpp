@@ -14,8 +14,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <mutex>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -23,6 +23,12 @@
 #include "ws_server.h"
 
 namespace {
+
+// The page heartbeats every 4 s while visible; three misses mean the phone
+// is gone (screen locked, Wi-Fi dropped) and the connection is evicted so
+// the dock's "connected" display stays honest. TCP alone would keep a dead
+// peer "connected" for minutes.
+constexpr uint64_t REMOTE_IDLE_TIMEOUT_MS = 12000;
 
 struct remote_state {
 	ws_server server;
@@ -34,7 +40,8 @@ struct remote_state {
 	uint64_t last_start_attempt_ms = 0;
 
 	std::mutex conns_mutex;
-	std::set<uint64_t> conns;
+	// Established connections -> last message tick (GetTickCount64 ms).
+	std::map<uint64_t, uint64_t> conns;
 
 	// Distance last pushed to clients; the dock slider moves it too, so
 	// the poll re-broadcasts whenever it drifts.
@@ -47,6 +54,11 @@ struct remote_state {
 	double acc_x = 0.0;
 	double acc_y = 0.0;
 	double acc_wheel = 0.0;
+
+	// Buttons currently held down by remote commands (left/right/middle).
+	// A dropped connection (phone locks its screen mid-drag) would leave
+	// the OS button stuck otherwise; on_close releases what is still down.
+	std::atomic<bool> button_down[3] = {};
 
 	// LAN address cache; adapter enumeration is too heavy for every poll.
 	std::mutex url_mutex;
@@ -192,7 +204,8 @@ void broadcast_state()
 	std::vector<uint64_t> conns;
 	{
 		std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
-		conns.assign(g_remote.conns.begin(), g_remote.conns.end());
+		for (const auto &kv : g_remote.conns)
+			conns.push_back(kv.first);
 	}
 	for (uint64_t conn : conns)
 		g_remote.server.send_text(conn, json);
@@ -256,7 +269,18 @@ void inject_button(int button, bool down)
 	else
 		in.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN
 				     : MOUSEEVENTF_LEFTUP;
+	g_remote.button_down[button == 1 ? 1 : (button == 2 ? 2 : 0)].store(
+		down, std::memory_order_relaxed);
 	SendInput(1, &in, sizeof(in));
+}
+
+// Lift whatever the remote still holds (connection loss, server stop).
+void release_held_buttons()
+{
+	for (int b = 0; b < 3; b++) {
+		if (g_remote.button_down[b].load(std::memory_order_relaxed))
+			inject_button(b, false);
+	}
 }
 
 // Fractional notches accumulate into high-resolution wheel events, so a slow
@@ -283,7 +307,14 @@ void inject_wheel(double notches)
 
 void handle_message(uint64_t conn, obs_data_t *msg)
 {
-	UNUSED_PARAMETER(conn);
+	// Every message is a liveness proof, including the page's bare
+	// {"t":"hb"} heartbeats.
+	{
+		std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
+		auto it = g_remote.conns.find(conn);
+		if (it != g_remote.conns.end())
+			it->second = GetTickCount64();
+	}
 	const char *type = obs_data_get_string(msg, "t");
 	if (!type)
 		return;
@@ -322,7 +353,7 @@ void start_server(uint16_t port, const std::string &token)
 	cb.on_open = [](uint64_t conn) {
 		{
 			std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
-			g_remote.conns.insert(conn);
+			g_remote.conns[conn] = GetTickCount64();
 		}
 		g_remote.server.send_text(conn, state_json());
 		blog(LOG_INFO,
@@ -330,8 +361,11 @@ void start_server(uint16_t port, const std::string &token)
 		     remote_control_client_count());
 	};
 	cb.on_close = [](uint64_t conn) {
-		std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
-		g_remote.conns.erase(conn);
+		{
+			std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
+			g_remote.conns.erase(conn);
+		}
+		release_held_buttons();
 	};
 	cb.on_text = handle_message;
 
@@ -352,6 +386,7 @@ void remote_control_sync()
 	if (!want) {
 		if (g_remote.server.running()) {
 			g_remote.server.stop();
+			release_held_buttons();
 			std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
 			g_remote.conns.clear();
 		}
@@ -374,6 +409,22 @@ void remote_control_sync()
 		return;
 	}
 
+	// Evict connections whose heartbeats stopped; their threads run the
+	// normal on_close teardown (button release, conns erase).
+	{
+		const uint64_t now = GetTickCount64();
+		std::vector<uint64_t> stale;
+		{
+			std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
+			for (const auto &kv : g_remote.conns) {
+				if (now - kv.second > REMOTE_IDLE_TIMEOUT_MS)
+					stale.push_back(kv.first);
+			}
+		}
+		for (uint64_t conn : stale)
+			g_remote.server.close_conn(conn);
+	}
+
 	// The dock slider (or a settings load) moved the distance: keep the
 	// phones' readout in sync.
 	const float dist =
@@ -386,6 +437,7 @@ void remote_control_sync()
 void remote_control_shutdown()
 {
 	g_remote.server.stop();
+	release_held_buttons();
 	std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
 	g_remote.conns.clear();
 }
