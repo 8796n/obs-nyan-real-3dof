@@ -1,0 +1,20 @@
+{
+  "ext_name": {
+    "message": "nyan Real Audio Wall connector"
+  },
+  "ext_desc": {
+    "message": "再生中のタブ音声とウィンドウ位置をローカル WebSocket で OBS の nyan Real Audio Wall ソースへ送り、ブラウザの各ウィンドウが仮想スクリーン上の位置から聞こえるようにします。"
+  },
+  "options_port_label": {
+    "message": "WebSocket ポート (OBS の nyan Real Audio Wall ソースの「ブラウザ連携ポート」と同じ番号):"
+  },
+  "options_save": {
+    "message": "保存"
+  },
+  "options_saved": {
+    "message": "保存しました"
+  },
+  "options_note": {
+    "message": "音を再生中のタブの音声は OBS 経由でのみ再生されます（タブ単体では無音になります）。"
+  }
+}
