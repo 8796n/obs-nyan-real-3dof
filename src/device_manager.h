@@ -31,8 +31,10 @@ enum dock_section_bit : uint32_t {
 	// saved dock_collapsed masks keep their meaning.
 	DOCK_SECTION_SCREEN = 1u << 4,
 	DOCK_SECTION_ADVANCED = 1u << 5,
+	DOCK_SECTION_REMOTE = 1u << 6,
 };
-constexpr uint32_t DOCK_COLLAPSED_DEFAULT = DOCK_SECTION_ADVANCED;
+constexpr uint32_t DOCK_COLLAPSED_DEFAULT = DOCK_SECTION_ADVANCED |
+					     DOCK_SECTION_REMOTE;
 
 struct device_manager {
 	std::mutex state_mutex;
@@ -98,6 +100,10 @@ struct device_manager {
 	// SBS output rendering of the virtual screen: 0 = auto (active while
 	// the glasses display runs a double-wide SBS mode), 1 = on, 2 = off.
 	std::atomic<int> sbs_output{0};
+	// Phone remote (LAN WebSocket server + touchpad page, dock-driven,
+	// persisted, default off). The token below gates the command channel.
+	std::atomic<bool> remote_enabled{false};
+	std::atomic<int> remote_port{DEFAULT_REMOTE_PORT};
 	std::atomic<bool> fov_auto{true};
 	std::atomic<int> virtual_source_count{0};
 	std::atomic<float> prediction_ms{10.0f};
@@ -126,6 +132,10 @@ struct device_manager {
 	// while the endpoint is absent.
 	std::string monitor_device_id;
 	std::string monitor_device_name;
+	// Secret in the phone remote's URL; commands without it are rejected.
+	// Generated once when the remote is first enabled and persisted, so a
+	// scanned QR code keeps working across OBS restarts.
+	std::string remote_token;
 };
 
 struct rate_log_state {
@@ -161,6 +171,9 @@ void detect_worker_fn(device_manager *f);
 void manager_apply_settings(device_manager *f, obs_data_t *settings);
 void manager_recenter(device_manager *f);
 void manager_recalibrate(device_manager *f);
+// Steps the screen distance on the shared log scale (SCREEN_DISTANCE_STEP_
+// RATIO per step, clamped to MIN/MAX). Positive = farther. Any thread.
+void manager_step_screen_distance(device_manager *f, double steps);
 void manager_apply_model_settings(device_manager *f);
 void manager_set_mag_yaw(device_manager *f, bool enabled);
 void manager_set_connect_enabled(device_manager *f, bool enabled);

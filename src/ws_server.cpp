@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 8796n <info@8796.jp>
-#include "ws_audio_server.h"
+#include "ws_server.h"
 
 #include <obs-module.h>
 
@@ -88,7 +88,14 @@ bool send_all(SOCKET s, const uint8_t *buf, size_t len)
 	return true;
 }
 
-// Server-to-client frame (unmasked).
+bool send_str(SOCKET s, const std::string &text)
+{
+	return send_all(s, reinterpret_cast<const uint8_t *>(text.data()),
+			text.size());
+}
+
+// Server-to-client frame (unmasked). Callers serialize per socket via the
+// connection's send mutex.
 bool send_frame(SOCKET s, uint8_t opcode, const uint8_t *payload, size_t len)
 {
 	std::vector<uint8_t> hdr;
@@ -134,41 +141,21 @@ std::string find_header(const std::string &req, const char *name)
 	return value;
 }
 
-bool websocket_handshake(SOCKET s)
+// Request target (path + query) of the request line, "" when malformed.
+std::string request_target(const std::string &req)
 {
-	std::string req;
-	uint8_t c = 0;
-	while (req.size() < MAX_HEADER_BYTES &&
-	       req.find("\r\n\r\n") == std::string::npos) {
-		if (!recv_exact(s, &c, 1))
-			return false;
-		req += static_cast<char>(c);
-	}
-	const std::string key = find_header(req, "Sec-WebSocket-Key");
-	if (key.empty()) {
-		const char *bad = "HTTP/1.1 400 Bad Request\r\n\r\n";
-		send_all(s, reinterpret_cast<const uint8_t *>(bad),
-			 strlen(bad));
-		return false;
-	}
-	const std::string accept_src =
-		key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-	uint8_t digest[20];
-	if (!sha1(reinterpret_cast<const uint8_t *>(accept_src.data()),
-		  accept_src.size(), digest))
-		return false;
-	const std::string resp = "HTTP/1.1 101 Switching Protocols\r\n"
-				 "Upgrade: websocket\r\n"
-				 "Connection: Upgrade\r\n"
-				 "Sec-WebSocket-Accept: " +
-				 base64(digest, 20) + "\r\n\r\n";
-	return send_all(s, reinterpret_cast<const uint8_t *>(resp.data()),
-			resp.size());
+	const size_t sp1 = req.find(' ');
+	if (sp1 == std::string::npos)
+		return "";
+	const size_t sp2 = req.find(' ', sp1 + 1);
+	if (sp2 == std::string::npos)
+		return "";
+	return req.substr(sp1 + 1, sp2 - sp1 - 1);
 }
 
 } // namespace
 
-struct ws_audio_server::impl {
+struct ws_server::impl {
 	SOCKET listener = INVALID_SOCKET;
 	std::thread accept_thread;
 	std::atomic<bool> stopping{false};
@@ -180,18 +167,107 @@ struct ws_audio_server::impl {
 		SOCKET sock = INVALID_SOCKET;
 		std::thread th;
 		std::atomic<bool> done{false};
+		// Established WebSocket (handshake completed): the external
+		// send_text path is valid, and on_close fires on teardown.
+		std::atomic<bool> ws_ready{false};
+		// Serializes writes: the frame loop's control frames, the
+		// HTTP/handshake responses and external send_text calls.
+		std::mutex send_mutex;
 	};
 	std::mutex conns_mutex;
 	std::list<std::unique_ptr<connection>> conns;
 
+	bool locked_send_frame(connection *conn, uint8_t opcode,
+			       const uint8_t *payload, size_t len)
+	{
+		std::lock_guard<std::mutex> lk(conn->send_mutex);
+		if (conn->sock == INVALID_SOCKET)
+			return false;
+		return send_frame(conn->sock, opcode, payload, len);
+	}
+
+	// Reads the request header block and answers it: WebSocket upgrades
+	// (optionally gated by on_ws_accept) proceed to the frame loop, plain
+	// GETs are served by on_http_get, anything else gets a 4xx. Only an
+	// established WebSocket returns true.
+	bool handle_request(connection *conn)
+	{
+		const SOCKET s = conn->sock;
+		std::string req;
+		uint8_t c = 0;
+		while (req.size() < MAX_HEADER_BYTES &&
+		       req.find("\r\n\r\n") == std::string::npos) {
+			if (!recv_exact(s, &c, 1))
+				return false;
+			req += static_cast<char>(c);
+		}
+		const std::string target = request_target(req);
+		const std::string key = find_header(req, "Sec-WebSocket-Key");
+		std::lock_guard<std::mutex> lk(conn->send_mutex);
+		if (key.empty()) {
+			// Not an upgrade: serve the static page when the
+			// owner provided one (the phone remote's UI).
+			if (cb.on_http_get && req.rfind("GET ", 0) == 0) {
+				const std::string body = cb.on_http_get(target);
+				if (body.empty()) {
+					send_str(s,
+						 "HTTP/1.1 404 Not Found\r\n"
+						 "Connection: close\r\n"
+						 "Content-Length: 0\r\n\r\n");
+					return false;
+				}
+				send_str(s,
+					 "HTTP/1.1 200 OK\r\n"
+					 "Content-Type: text/html; charset=utf-8\r\n"
+					 "Cache-Control: no-store\r\n"
+					 "Connection: close\r\n"
+					 "Content-Length: " +
+						 std::to_string(body.size()) +
+						 "\r\n\r\n" +
+						 body);
+				return false;
+			}
+			send_str(s, "HTTP/1.1 400 Bad Request\r\n\r\n");
+			return false;
+		}
+		if (cb.on_ws_accept && !cb.on_ws_accept(target)) {
+			send_str(s, "HTTP/1.1 403 Forbidden\r\n"
+				    "Connection: close\r\n"
+				    "Content-Length: 0\r\n\r\n");
+			return false;
+		}
+		const std::string accept_src =
+			key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+		uint8_t digest[20];
+		if (!sha1(reinterpret_cast<const uint8_t *>(accept_src.data()),
+			  accept_src.size(), digest))
+			return false;
+		const std::string resp = "HTTP/1.1 101 Switching Protocols\r\n"
+					 "Upgrade: websocket\r\n"
+					 "Connection: Upgrade\r\n"
+					 "Sec-WebSocket-Accept: " +
+					 base64(digest, 20) + "\r\n\r\n";
+		return send_str(s, resp);
+	}
+
 	void run_connection(connection *conn)
 	{
-		if (websocket_handshake(conn->sock))
+		if (handle_request(conn)) {
+			conn->ws_ready = true;
+			if (cb.on_open)
+				cb.on_open(conn->id);
 			frame_loop(conn);
-		shutdown(conn->sock, SD_BOTH);
-		closesocket(conn->sock);
-		conn->sock = INVALID_SOCKET;
-		if (cb.on_close)
+		}
+		const bool was_ws = conn->ws_ready.load();
+		{
+			// Invalidate under the send mutex so an in-flight
+			// send_text never writes to a recycled descriptor.
+			std::lock_guard<std::mutex> lk(conn->send_mutex);
+			shutdown(conn->sock, SD_BOTH);
+			closesocket(conn->sock);
+			conn->sock = INVALID_SOCKET;
+		}
+		if (was_ws && cb.on_close)
 			cb.on_close(conn->id);
 		conn->done = true;
 	}
@@ -236,12 +312,12 @@ struct ws_audio_server::impl {
 				payload[i] ^= mask[i & 3];
 
 			if (opcode == 8) { // close
-				send_frame(conn->sock, 8, nullptr, 0);
+				locked_send_frame(conn, 8, nullptr, 0);
 				return;
 			}
 			if (opcode == 9) { // ping
-				send_frame(conn->sock, 10, payload.data(),
-					   payload.size());
+				locked_send_frame(conn, 10, payload.data(),
+						  payload.size());
 				continue;
 			}
 			if (opcode == 10) // pong
@@ -304,8 +380,9 @@ struct ws_audio_server::impl {
 				closesocket(s);
 				return;
 			}
-			// Realtime PCM in small frames: never let Nagle batch
-			// them, that only adds delivery jitter on loopback.
+			// Realtime PCM and pointer deltas come in small
+			// frames: never let Nagle batch them, that only adds
+			// delivery jitter.
 			BOOL nodelay = TRUE;
 			setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
 				   reinterpret_cast<const char *>(&nodelay),
@@ -325,12 +402,12 @@ struct ws_audio_server::impl {
 	}
 };
 
-ws_audio_server::~ws_audio_server()
+ws_server::~ws_server()
 {
 	stop();
 }
 
-bool ws_audio_server::start(uint16_t port, ws_server_callbacks cb)
+bool ws_server::start(uint16_t port, ws_server_callbacks cb, bool lan)
 {
 	stop();
 
@@ -343,17 +420,19 @@ bool ws_audio_server::start(uint16_t port, ws_server_callbacks cb)
 		WSACleanup();
 		return false;
 	}
-	// Loopback only: this is a local extension ingest, never exposed.
+	// Loopback by default (local extension ingest); the phone remote opts
+	// into the LAN bind and gates commands with its URL token.
+	const char *bind_ip = lan ? "0.0.0.0" : "127.0.0.1";
 	sockaddr_in addr = {};
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(port);
-	inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+	inet_pton(AF_INET, bind_ip, &addr.sin_addr);
 	if (bind(listener, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) !=
 		    0 ||
 	    listen(listener, 4) != 0) {
 		blog(LOG_WARNING,
-		     "[obs-nyan-real-3dof] audio wall: cannot listen on 127.0.0.1:%u (in use?)",
-		     port);
+		     "[obs-nyan-real-3dof] ws: cannot listen on %s:%u (in use?)",
+		     bind_ip, port);
 		closesocket(listener);
 		WSACleanup();
 		return false;
@@ -365,13 +444,12 @@ bool ws_audio_server::start(uint16_t port, ws_server_callbacks cb)
 	impl_->accept_thread = std::thread([this]() { impl_->accept_loop(); });
 	running_ = true;
 	port_ = port;
-	blog(LOG_INFO,
-	     "[obs-nyan-real-3dof] audio wall: WebSocket ingest on 127.0.0.1:%u",
+	blog(LOG_INFO, "[obs-nyan-real-3dof] ws: listening on %s:%u", bind_ip,
 	     port);
 	return true;
 }
 
-void ws_audio_server::stop()
+void ws_server::stop()
 {
 	if (!impl_)
 		return;
@@ -403,4 +481,25 @@ void ws_audio_server::stop()
 	running_ = false;
 	port_ = 0;
 	WSACleanup();
+}
+
+bool ws_server::send_text(uint64_t conn, const std::string &text)
+{
+	if (!impl_)
+		return false;
+	// Holding conns_mutex through the send keeps the connection object
+	// alive against the reaper; frames are small, so the accept loop is
+	// blocked only momentarily.
+	std::lock_guard<std::mutex> lk(impl_->conns_mutex);
+	for (auto &c : impl_->conns) {
+		if (c->id != conn)
+			continue;
+		if (!c->ws_ready.load())
+			return false;
+		return impl_->locked_send_frame(
+			c.get(), 1,
+			reinterpret_cast<const uint8_t *>(text.data()),
+			text.size());
+	}
+	return false;
 }

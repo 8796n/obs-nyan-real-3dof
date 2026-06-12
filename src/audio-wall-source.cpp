@@ -41,7 +41,7 @@
 #include "display-wall-source.h"
 #include "spatial_pan.h"
 #include "tooltip_util.h"
-#include "ws_audio_server.h"
+#include "ws_server.h"
 
 namespace {
 
@@ -306,7 +306,7 @@ struct audio_wall_engine {
 	std::mutex ws_exe_mutex;
 	std::set<std::string> ws_exes;
 
-	ws_audio_server ws_server;
+	ws_server ws;
 
 	// Poll thread output; tick applies it when the generation moves.
 	std::mutex desired_mutex;
@@ -845,7 +845,7 @@ void start_ws_server(audio_wall_engine *wall, uint16_t port)
 		wall_ws_binary(wall, conn, data, len);
 	};
 	cb.on_close = [wall](uint64_t conn) { wall_ws_closed(wall, conn); };
-	wall->ws_server.start(port, std::move(cb));
+	wall->ws.start(port, std::move(cb));
 }
 
 // Apply the poll thread's desired app list: create captures for new apps,
@@ -976,7 +976,7 @@ void wall_update(void *data, obs_data_t *settings)
 	if (port_setting < 1024 || port_setting > 65535)
 		port_setting = 8796;
 	const uint16_t port = static_cast<uint16_t>(port_setting);
-	if (!wall->ws_server.running() || wall->ws_server.port() != port)
+	if (!wall->ws.running() || wall->ws.port() != port)
 		start_ws_server(wall, port);
 }
 
@@ -985,7 +985,7 @@ void wall_destroy(void *data)
 	auto *wall = static_cast<audio_wall_engine *>(data);
 	// Join the WS connection threads before touching the children they
 	// feed; after stop() no callback can run.
-	wall->ws_server.stop();
+	wall->ws.stop();
 	{
 		std::lock_guard<std::mutex> lk(wall->poll_mutex);
 		wall->stop = true;

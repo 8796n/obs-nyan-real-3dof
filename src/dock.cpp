@@ -17,8 +17,10 @@
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
 #include <QScreen>
@@ -48,6 +50,8 @@
 #include "device_manager.h"
 #include "device_registry.h"
 #include "display-wall-source.h"
+#include "qrcodegen/qrcodegen.hpp"
+#include "remote_control.h"
 #include "tooltip_util.h"
 #include "virtual_source.h"
 
@@ -635,6 +639,36 @@ public:
 						 screen_body, content);
 		root->addWidget(screen_section);
 
+		// Phone remote: a LAN touchpad page served by the plugin.
+		// Collapsed and disabled by default; enabling shows the QR
+		// code that opens the page (URL carries the access token).
+		auto *remote_body = new QWidget(content);
+		auto *remote_form = new QFormLayout(remote_body);
+		remote_form->setContentsMargins(16, 0, 0, 4);
+		remote_enable_box = new QCheckBox(
+			obs_module_text("dock.remote_enable"), remote_body);
+		remote_enable_box->setToolTip(
+			tip("dock.remote_enable_tooltip"));
+		remote_form->addRow(remote_enable_box);
+		remote_port_spin = new NoWheelSpinBox(remote_body);
+		remote_port_spin->setRange(1024, 65535);
+		remote_form->addRow(obs_module_text("dock.remote_port"),
+				    remote_port_spin);
+		remote_qr_label = new QLabel(remote_body);
+		remote_qr_label->setAlignment(Qt::AlignCenter);
+		remote_qr_label->setVisible(false);
+		remote_form->addRow(remote_qr_label);
+		remote_url_label = new QLabel(remote_body);
+		remote_url_label->setTextInteractionFlags(
+			Qt::TextSelectableByMouse);
+		remote_url_label->setAlignment(Qt::AlignCenter);
+		remote_url_label->setWordWrap(true);
+		remote_url_label->setVisible(false);
+		remote_form->addRow(remote_url_label);
+		remote_section = new DockSection(
+			obs_module_text("dock.remote"), remote_body, content);
+		root->addWidget(remote_section);
+
 		// Rarely-touched settings, collapsed by default. The One-family
 		// TCP endpoint rows still follow the detected device.
 		auto *advanced_body = new QWidget(content);
@@ -676,6 +710,7 @@ public:
 		bind_section(device_section, DOCK_SECTION_DEVICE);
 		bind_section(output_section, DOCK_SECTION_OUTPUT);
 		bind_section(screen_section, DOCK_SECTION_SCREEN);
+		bind_section(remote_section, DOCK_SECTION_REMOTE);
 		bind_section(advanced_section, DOCK_SECTION_ADVANCED);
 
 		QObject::connect(connect_box, &QCheckBox::toggled, this,
@@ -858,6 +893,24 @@ public:
 					 g_device.ipd_mm.store(static_cast<float>(value),
 							       std::memory_order_relaxed);
 				 });
+		QObject::connect(remote_enable_box, &QCheckBox::toggled, this,
+				 [this](bool checked) {
+					 g_device.remote_enabled.store(
+						 checked,
+						 std::memory_order_relaxed);
+					 remote_control_sync();
+					 refresh();
+				 });
+		// The server restart (and the bind-retry throttle) live in
+		// remote_control_sync, driven by the poll.
+		QObject::connect(remote_port_spin,
+				 static_cast<void (QSpinBox::*)(int)>(
+					 &QSpinBox::valueChanged),
+				 this, [](int value) {
+					 g_device.remote_port.store(
+						 value,
+						 std::memory_order_relaxed);
+				 });
 		QObject::connect(mag_yaw_box, &QCheckBox::toggled, this,
 				 [](bool checked) { manager_set_mag_yaw(&g_device, checked); });
 		QObject::connect(debug_box, &QCheckBox::toggled, this, [](bool checked) {
@@ -986,6 +1039,8 @@ private:
 				!(collapsed & DOCK_SECTION_OUTPUT));
 			screen_section->set_expanded(
 				!(collapsed & DOCK_SECTION_SCREEN));
+			remote_section->set_expanded(
+				!(collapsed & DOCK_SECTION_REMOTE));
 			advanced_section->set_expanded(
 				!(collapsed & DOCK_SECTION_ADVANCED));
 		}
@@ -1364,6 +1419,7 @@ private:
 			QSignalBlocker block(debug_box);
 			debug_box->setChecked(g_device.debug_log.load(std::memory_order_relaxed));
 		}
+		refresh_remote();
 
 		const double diag_m =
 			2.0 * SCREEN_SIZE_UNIT_DISTANCE_M * std::tan(fov * PI / 360.0) *
@@ -1389,6 +1445,61 @@ private:
 						"screen_distance_focus_note"),
 					focus_m)));
 		}
+	}
+
+	// Reconcile the phone-remote server with the dock state, then mirror
+	// the result: a QR code + URL while it runs, a hint while the LAN
+	// address (or the port) is unavailable, nothing while disabled.
+	void refresh_remote()
+	{
+		remote_control_sync();
+		const bool enabled =
+			g_device.remote_enabled.load(std::memory_order_relaxed);
+		{
+			QSignalBlocker block(remote_enable_box);
+			remote_enable_box->setChecked(enabled);
+		}
+		set_spin(remote_port_spin,
+			 g_device.remote_port.load(std::memory_order_relaxed));
+		const std::string url = enabled ? remote_control_url() : "";
+		if (url == last_remote_url && enabled == last_remote_enabled)
+			return;
+		last_remote_url = url;
+		last_remote_enabled = enabled;
+		if (url.empty()) {
+			remote_qr_label->clear();
+			remote_qr_label->setVisible(false);
+			remote_url_label->setText(
+				enabled ? obs_module_text(
+						  "dock.remote_unavailable")
+					: "");
+			remote_url_label->setVisible(enabled);
+			return;
+		}
+		// Crisp integer-scaled QR with a quiet zone; the white pad
+		// keeps it scannable on dark themes.
+		const qrcodegen::QrCode qr = qrcodegen::QrCode::encodeText(
+			url.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
+		const int n = qr.getSize();
+		const int quiet = 4;
+		QImage img(n + quiet * 2, n + quiet * 2,
+			   QImage::Format_RGB32);
+		img.fill(Qt::white);
+		for (int y = 0; y < n; y++) {
+			for (int x = 0; x < n; x++) {
+				if (qr.getModule(x, y))
+					img.setPixel(x + quiet, y + quiet,
+						     qRgb(0, 0, 0));
+			}
+		}
+		const int scale = std::max(2, 192 / img.width());
+		remote_qr_label->setPixmap(QPixmap::fromImage(
+			img.scaled(img.width() * scale, img.width() * scale,
+				   Qt::KeepAspectRatio,
+				   Qt::FastTransformation)));
+		remote_qr_label->setVisible(true);
+		remote_url_label->setText(QString::fromStdString(url));
+		remote_url_label->setVisible(true);
 	}
 
 	// Sync the monitoring-output combo with the present device list and
@@ -1492,7 +1603,15 @@ private:
 	DockSection *device_section = nullptr;
 	DockSection *output_section = nullptr;
 	DockSection *screen_section = nullptr;
+	DockSection *remote_section = nullptr;
 	DockSection *advanced_section = nullptr;
+	QCheckBox *remote_enable_box = nullptr;
+	QSpinBox *remote_port_spin = nullptr;
+	QLabel *remote_qr_label = nullptr;
+	QLabel *remote_url_label = nullptr;
+	// Last QR/URL state rendered, to skip the needless re-encode.
+	std::string last_remote_url;
+	bool last_remote_enabled = false;
 	// Last dock_collapsed mask seen, to detect settings loads.
 	uint32_t last_collapsed_seen = UINT32_MAX;
 	QLineEdit *ip_edit = nullptr;

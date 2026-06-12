@@ -38,6 +38,14 @@ constexpr float MAX_SCREEN_DISTANCE_M = 10.0f;
 // Fallback optical virtual-image ("focal") distance for models whose spec is
 // not recorded in the registry; ~4 m is typical of current birdbath optics.
 constexpr float DEFAULT_OPTICS_FOCUS_M = 4.0f;
+// One wheel/remote step scales the screen distance by this ratio. The log
+// scale makes a step feel the same near 0.3 m and near 5 m (~14 steps per
+// doubling, ~94 steps across the full 0.1-10 m range). Shared by every
+// step-style entry point (phone remote; a future PC mouse wheel).
+constexpr double SCREEN_DISTANCE_STEP_RATIO = 1.05;
+// Phone-remote input server (LAN WebSocket + served touchpad page). One above
+// the Audio Wall's browser-ingest default so both can run side by side.
+constexpr int DEFAULT_REMOTE_PORT = 8797;
 constexpr float DEFAULT_SCREEN_CURVE = 0.0f;
 constexpr float VIRTUAL_TARGET_RETRY_INTERVAL_S = 1.0f;
 constexpr float MAX_SCREEN_CURVE = 3.0f;

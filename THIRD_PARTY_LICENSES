@@ -14,6 +14,11 @@ OBS Studio installation):
 - Windows system libraries (Ws2_32, Iphlpapi, SetupAPI, Hid, User32) and the
   MSVC runtime, covered by the GPL system-library exception
 
+Vendored in this repository (compiled into the plugin):
+- QR Code generator library (C++), Project Nayuki (src/qrcodegen/)
+  https://www.nayuki.io/page/qr-code-generator-library
+  License: MIT (full text in the source file headers)
+
 Build-time only (fetched by setup.ps1, not distributed in this repository):
 - OBS Studio / libobs headers + generated import libraries
   https://github.com/obsproject/obs-studio
