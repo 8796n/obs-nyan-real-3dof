@@ -46,8 +46,9 @@ inline spatial_gains compute_spatial_gains(double bearing_deg, double yaw_rad,
 	const double arel = std::fabs(rel);
 	const double half_pi = PI / 2.0;
 
-	// Sources behind the head keep the fully-sided pan and lose a little
-	// level (-2.5 dB directly behind) as a cheap "behind" cue.
+	// Sources behind the head lose a little level (-2.5 dB directly
+	// behind) as a cheap "behind" cue; the pan itself mirrors the front
+	// (see below), so the level dip is what distinguishes front and back.
 	const double back =
 		arel > half_pi
 			? 1.0 - 0.25 * std::min(1.0, (arel - half_pi) / half_pi)
@@ -63,8 +64,12 @@ inline spatial_gains compute_spatial_gains(double bearing_deg, double yaw_rad,
 		dist = clampd(DEFAULT_SCREEN_DISTANCE_M / d, 0.25, 2.0);
 	}
 
-	// Constant-power pan: gl^2 + gr^2 = 1.
-	const double p = std::sin(clampd(rel, -half_pi, half_pi));
+	// Constant-power pan: gl^2 + gr^2 = 1. The pan argument is the full
+	// sin(rel), continuous around the whole circle: a source passing
+	// directly behind folds back toward the center (rear mirrors the
+	// front, like real interaural level differences) instead of being
+	// pinned hard-side until +-180 deg and then jumping to the other ear.
+	const double p = std::sin(rel);
 	const double pan_arg = (p + 1.0) * PI / 4.0;
 	double gl = std::cos(pan_arg);
 	double gr = std::sin(pan_arg);
