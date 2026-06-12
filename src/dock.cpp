@@ -568,21 +568,6 @@ public:
 						 output_body, content);
 		root->addWidget(output_section);
 
-		// Marker-6DoF settings; the section appears only while the Eye
-		// camera is attached with UVC enabled (see refresh()).
-		auto *marker_body = new QWidget(content);
-		auto *marker_form = new QFormLayout(marker_body);
-		marker_form->setContentsMargins(16, 0, 0, 4);
-		dist_marker_box = new QCheckBox(
-			obs_module_text("screen_dist_marker"), marker_body);
-		dist_marker_box->setToolTip(
-			tip("screen_dist_marker_tooltip"));
-		marker_form->addRow(dist_marker_box);
-		marker_section = new DockSection(obs_module_text("dock.marker"),
-						 marker_body, content);
-		marker_section->setVisible(false);
-		root->addWidget(marker_section);
-
 		auto *screen_body = new QWidget(content);
 		auto *screen_form = new QFormLayout(screen_body);
 		screen_form->setContentsMargins(16, 0, 0, 4);
@@ -601,8 +586,6 @@ public:
 		distance_spin->setDecimals(1);
 		distance_spin->setSingleStep(0.1);
 		size_spin = new NoWheelDoubleSpinBox(screen_body);
-		// Down to 0.05: the marker distance sync scales the factor
-		// with the distance ratio, and a 4 m -> 0.5 m move needs 1/8.
 		size_spin->setRange(0.05, 4.0);
 		size_spin->setDecimals(2);
 		size_spin->setSingleStep(0.05);
@@ -687,7 +670,6 @@ public:
 		bind_section(status_section, DOCK_SECTION_STATUS);
 		bind_section(device_section, DOCK_SECTION_DEVICE);
 		bind_section(output_section, DOCK_SECTION_OUTPUT);
-		bind_section(marker_section, DOCK_SECTION_MARKER);
 		bind_section(screen_section, DOCK_SECTION_SCREEN);
 		bind_section(advanced_section, DOCK_SECTION_ADVANCED);
 
@@ -821,12 +803,6 @@ public:
 				 this, [](double value) {
 					 g_device.prediction_ms.store(static_cast<float>(value),
 								      std::memory_order_relaxed);
-				 });
-		QObject::connect(dist_marker_box, &QCheckBox::toggled, this,
-				 [](bool checked) {
-					 g_device.screen_dist_from_marker.store(
-						 checked,
-						 std::memory_order_relaxed);
 				 });
 		QObject::connect(fov_auto_box, &QCheckBox::toggled, this, [this](bool checked) {
 			g_device.fov_auto.store(checked, std::memory_order_relaxed);
@@ -997,8 +973,6 @@ private:
 				!(collapsed & DOCK_SECTION_DEVICE));
 			output_section->set_expanded(
 				!(collapsed & DOCK_SECTION_OUTPUT));
-			marker_section->set_expanded(
-				!(collapsed & DOCK_SECTION_MARKER));
 			screen_section->set_expanded(
 				!(collapsed & DOCK_SECTION_SCREEN));
 			advanced_section->set_expanded(
@@ -1098,18 +1072,6 @@ private:
 					     : "dock.eye.enable"));
 			eye_button->setEnabled(eye_present == 1 &&
 					       eye_uvc >= 0 && !eye_pending);
-			// Marker-6DoF section: shown while tracking is
-			// possible (Eye attached, UVC on). Pending toggles and
-			// unknown states keep the last visibility so the
-			// section does not flicker through the USB
-			// re-enumeration a UVC switch causes.
-			if (!traits_for(transport).eye_camera)
-				marker_section_on = false;
-			else if (!eye_pending && eye_present >= 0 &&
-				 eye_uvc >= 0)
-				marker_section_on = eye_present == 1 &&
-						    eye_uvc == 1;
-			marker_section->setVisible(marker_section_on);
 		}
 		// The display-mode row is adjustable while the session has the
 		// device's command channel open (-1 = unknown/unavailable).
@@ -1351,12 +1313,6 @@ private:
 			QSignalBlocker block(fov_auto_box);
 			fov_auto_box->setChecked(fov_auto);
 		}
-		{
-			QSignalBlocker block(dist_marker_box);
-			dist_marker_box->setChecked(
-				g_device.screen_dist_from_marker.load(
-					std::memory_order_relaxed));
-		}
 		set_double_enabled(fov_spin, fov_slider, !fov_auto);
 		set_double_control(prediction_spin, prediction_slider,
 				   PREDICTION_SLIDER_SCALE,
@@ -1503,11 +1459,8 @@ private:
 	DockSection *status_section = nullptr;
 	DockSection *device_section = nullptr;
 	DockSection *output_section = nullptr;
-	DockSection *marker_section = nullptr;
 	DockSection *screen_section = nullptr;
 	DockSection *advanced_section = nullptr;
-	// Marker section visibility, held through UVC toggles (see refresh).
-	bool marker_section_on = false;
 	// Last dock_collapsed mask seen, to detect settings loads.
 	uint32_t last_collapsed_seen = UINT32_MAX;
 	QLineEdit *ip_edit = nullptr;
@@ -1524,7 +1477,6 @@ private:
 	QDoubleSpinBox *prediction_spin = nullptr;
 	QSlider *prediction_slider = nullptr;
 	QCheckBox *fov_auto_box = nullptr;
-	QCheckBox *dist_marker_box = nullptr;
 	QDoubleSpinBox *fov_spin = nullptr;
 	QSlider *fov_slider = nullptr;
 	// Row container of the distance slider; refresh() rewrites its

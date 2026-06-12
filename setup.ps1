@@ -133,12 +133,3 @@ if (-not (Test-Path $qtConfig)) {
 }
 
 Write-Host "`nsetup done. Now: .\build.ps1 ; .\install.ps1" -ForegroundColor Green
-
-# 5. apriltag (BSD-2-Clause) for the marker-6DoF tracker ------------------------
-if (-not (Test-Path "$SRC\deps\apriltag\apriltag.h")) {
-  Write-Host "[5/5] cloning apriltag v3.4.2"
-  git clone --depth 1 --branch v3.4.2 `
-    https://github.com/AprilRobotics/apriltag.git "$SRC\deps\apriltag"
-} else {
-  Write-Host "[5/5] apriltag present"
-}

@@ -27,7 +27,8 @@ enum dock_section_bit : uint32_t {
 	DOCK_SECTION_STATUS = 1u << 0,
 	DOCK_SECTION_DEVICE = 1u << 1,
 	DOCK_SECTION_OUTPUT = 1u << 2,
-	DOCK_SECTION_MARKER = 1u << 3,
+	// 1u << 3 was the retired marker-6DoF section; left unassigned so
+	// saved dock_collapsed masks keep their meaning.
 	DOCK_SECTION_SCREEN = 1u << 4,
 	DOCK_SECTION_ADVANCED = 1u << 5,
 };
@@ -40,7 +41,6 @@ struct device_manager {
 
 	std::thread worker;
 	std::thread detect_worker;
-	std::thread marker_worker;
 	std::atomic<bool> stop{false};
 	std::atomic<uint32_t> reconnect_epoch{0};
 	std::atomic<bool> connected{false};
@@ -57,11 +57,6 @@ struct device_manager {
 	std::atomic<bool> cursor_fence{false};
 	// Folded dock sections (dock_section_bit mask, dock-driven).
 	std::atomic<uint32_t> dock_collapsed{DOCK_COLLAPSED_DEFAULT};
-	// Marker 6DoF: printed-tag size (black square side) in millimeters.
-	std::atomic<float> tag_size_mm{80.0f};
-	// Set the virtual-screen distance from the measured head-to-tag
-	// distance every time the marker origin anchors (i.e. per recenter).
-	std::atomic<bool> screen_dist_from_marker{false};
 	std::atomic<int> detected_model{MODEL_UNKNOWN}; // model_id, set by worker
 	// Mount override in centidegrees, reported by the device itself (RayNeo
 	// derives it from the device-info board id). INT32_MIN = no override,
@@ -148,13 +143,6 @@ bool publish_sensor_samples(device_manager *f, const imu_sample *imu,
 			    const mag_sample *mag);
 bool publish_external_pose(device_manager *f, const quatd &device_q,
 			   uint32_t ts_us);
-// Marker-6DoF head position (camera position in the tag frame, world axis
-// convention) from the marker tracker thread.
-void publish_marker_position(device_manager *f, const vec3d &p_tag_world,
-			     uint32_t ts_us);
-// Current recentered orientation (pose_snapshot.q) for the marker thread's
-// planar-pose disambiguation.
-quatd device_pose_orientation(device_manager *f);
 void maybe_log_sensor_rate(device_manager *f, rate_log_state &st,
 			   const char *transport);
 void worker_fn(device_manager *f);
