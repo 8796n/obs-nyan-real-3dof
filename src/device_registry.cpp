@@ -365,6 +365,11 @@ static void append_user_devices(std::vector<device_entry> &out,
 		const long long h = obs_data_get_int(item, "display_height");
 		e.profile.display_width = w > 0 ? static_cast<uint32_t>(w) : 1920;
 		e.profile.display_height = h > 0 ? static_cast<uint32_t>(h) : 1080;
+		// Optional optical virtual-image distance; 0 (absent) falls
+		// back to DEFAULT_OPTICS_FOCUS_M through optics_focus().
+		const double focus = obs_data_get_double(item, "optics_focus_m");
+		if (std::isfinite(focus) && focus >= 0.5 && focus <= 20.0)
+			e.profile.optics_focus_m = static_cast<float>(focus);
 		const char *product = obs_data_get_string(item, "product_contains");
 		if (product && *product) {
 			wchar_t *wproduct = nullptr;

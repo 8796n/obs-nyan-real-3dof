@@ -17,12 +17,27 @@
 #define BUILD_INFO \
 	("obs-nyan-real-3dof " NYAN_REAL_3DOF_VERSION "  (built " NYAN_REAL_3DOF_BUILD_TIME ")")
 
-constexpr float DEFAULT_SCREEN_DISTANCE_M = 4.0f;
+// Scale unit of the screen size factor: factor 1.0 is the physical size that
+// fills the display FOV seen from this distance. An arbitrary anchor kept from
+// the original 4 m default distance, NOT an optical property - it must never
+// change, or every saved size factor changes its on-screen size.
+constexpr float SCREEN_SIZE_UNIT_DISTANCE_M = 4.0f;
+// The defaults model a desk monitor: a screen 1 m ahead sized to fill the FOV
+// (factor = 1 m / 4 m unit, ~37 in diagonal at 50 deg). Mono rendering looks
+// identical to the old 4 m + 1.0 pair (similar triangles), but everything
+// driven by real-world meters - SBS vergence, head translation, the audio
+// distance gain - responds at desk scale instead of cinema scale.
+constexpr float DEFAULT_SCREEN_DISTANCE_M = 1.0f;
+constexpr float DEFAULT_SCREEN_SIZE_FACTOR =
+	DEFAULT_SCREEN_DISTANCE_M / SCREEN_SIZE_UNIT_DISTANCE_M;
 // 0.1 m is an experimental extreme for the "walk up to the screen" effect;
 // with SBS parallax, distances under ~0.5 m strain the eyes (the convergence
 // follows the distance but the glasses' focal plane stays fixed).
 constexpr float MIN_SCREEN_DISTANCE_M = 0.1f;
 constexpr float MAX_SCREEN_DISTANCE_M = 10.0f;
+// Fallback optical virtual-image ("focal") distance for models whose spec is
+// not recorded in the registry; ~4 m is typical of current birdbath optics.
+constexpr float DEFAULT_OPTICS_FOCUS_M = 4.0f;
 constexpr float DEFAULT_SCREEN_CURVE = 0.0f;
 constexpr float VIRTUAL_TARGET_RETRY_INTERVAL_S = 1.0f;
 constexpr float MAX_SCREEN_CURVE = 3.0f;
@@ -79,6 +94,17 @@ struct model_profile {
 	uint32_t display_width;
 	uint32_t display_height;
 	std::string name;
+	// Optical virtual-image distance in meters; 0 = not recorded.
+	// Rendering never uses it (the focal plane is fixed hardware); it
+	// only feeds the dock's SBS comfort guidance, where setting the
+	// screen distance to it minimizes vergence-accommodation conflict.
+	// Read through optics_focus() for the fallback.
+	float optics_focus_m = 0.0f;
+	float optics_focus() const
+	{
+		return optics_focus_m > 0.0f ? optics_focus_m
+					     : DEFAULT_OPTICS_FOCUS_M;
+	}
 };
 
 // One registry row: USB identity plus the profile it selects. pid 0 matches

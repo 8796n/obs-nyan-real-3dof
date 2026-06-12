@@ -59,8 +59,9 @@ inline spatial_gains compute_spatial_gains(double bearing_deg, double yaw_rad,
 		const double d = clampd(
 			g_device.screen_distance_m.load(std::memory_order_relaxed),
 			MIN_SCREEN_DISTANCE_M, MAX_SCREEN_DISTANCE_M);
-		// Inverse-distance law referenced to the 4 m default, capped
-		// so the dock's distance slider cannot blow up the mix.
+		// Inverse-distance law referenced to the default screen
+		// distance (neutral level out of the box), capped so the
+		// dock's distance slider cannot blow up the mix.
 		dist = clampd(DEFAULT_SCREEN_DISTANCE_M / d, 0.25, 2.0);
 	}
 

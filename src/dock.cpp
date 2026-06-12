@@ -623,9 +623,11 @@ public:
 		screen_form->addRow(obs_module_text("fov_deg"),
 				    make_double_slider(screen_body, fov_spin, &fov_slider,
 						       FOV_SLIDER_SCALE));
-		auto *distance_row = make_double_slider(screen_body, distance_spin,
-							&distance_slider,
-							DISTANCE_SLIDER_SCALE);
+		distance_row = make_double_slider(screen_body, distance_spin,
+						  &distance_slider,
+						  DISTANCE_SLIDER_SCALE);
+		// The base text; refresh() appends the detected model's
+		// optical focal distance as SBS comfort guidance.
 		distance_row->setToolTip(
 			tip("screen_distance_tooltip"));
 		screen_form->addRow(obs_module_text("screen_distance_m"),
@@ -1376,13 +1378,29 @@ private:
 		}
 
 		const double diag_m =
-			2.0 * DEFAULT_SCREEN_DISTANCE_M * std::tan(fov * PI / 360.0) *
+			2.0 * SCREEN_SIZE_UNIT_DISTANCE_M * std::tan(fov * PI / 360.0) *
 			size_factor;
 		const double diag_in = diag_m / 0.0254;
 		const double apparent_fov = 2.0 * std::atan(diag_m / (2.0 * distance)) *
 					    180.0 / PI;
 		screen_label->setText(QString::asprintf("%.1f in / %.1f deg", diag_in,
 							apparent_fov));
+
+		// SBS comfort guidance: the distance tooltip names the active
+		// model's optical focal distance - setting the screen distance
+		// there makes vergence match accommodation, which is easiest
+		// on the eyes during long SBS sessions.
+		const float focus_m = profile_for(detected).optics_focus();
+		if (focus_m != last_focus_tip_m) {
+			last_focus_tip_m = focus_m;
+			distance_row->setToolTip(QStringLiteral("<qt>%1 %2</qt>").arg(
+				QString::fromUtf8(obs_module_text(
+					"screen_distance_tooltip")),
+				QString::asprintf(
+					obs_module_text(
+						"screen_distance_focus_note"),
+					focus_m)));
+		}
 	}
 
 	// Sync the monitoring-output combo with the present device list and
@@ -1509,6 +1527,11 @@ private:
 	QCheckBox *dist_marker_box = nullptr;
 	QDoubleSpinBox *fov_spin = nullptr;
 	QSlider *fov_slider = nullptr;
+	// Row container of the distance slider; refresh() rewrites its
+	// tooltip when the detected model (and so its optical focal
+	// distance) changes.
+	QWidget *distance_row = nullptr;
+	float last_focus_tip_m = 0.0f;
 	QDoubleSpinBox *distance_spin = nullptr;
 	QSlider *distance_slider = nullptr;
 	QDoubleSpinBox *size_spin = nullptr;

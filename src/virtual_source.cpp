@@ -250,7 +250,11 @@ static quatd set_warp_effect_parameters(gs_eparam_t *p_pose_q,
 	tan_half_fov.x = tan_x;
 	tan_half_fov.y = tan_y;
 	struct vec2 screen_half_size_m;
-	screen_half_size_m.y = DEFAULT_SCREEN_DISTANCE_M * tan_y *
+	// The size factor scales against the fixed 4 m unit (factor 1.0 fills
+	// the FOV seen from 4 m), independent of the current distance - moving
+	// the distance slider keeps the physical size and changes how big the
+	// screen looks.
+	screen_half_size_m.y = SCREEN_SIZE_UNIT_DISTANCE_M * tan_y *
 			       screen_size_factor * screen_height_factor;
 	screen_half_size_m.x = screen_half_size_m.y * screen_aspect;
 	// Published for the Audio Wall's geometric bearing computation.
