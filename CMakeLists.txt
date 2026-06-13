@@ -18,29 +18,49 @@ if(EXISTS "${QT_ROOT}/lib/cmake/Qt6/Qt6Config.cmake")
 endif()
 find_package(Qt6 COMPONENTS Widgets QUIET)
 
+# nyan_core: the OBS-independent engine (MIT-licensed, src/core/). It links no
+# OBS or Qt and carries no OBS include dirs, so any accidental libobs/Qt use in
+# core code fails to compile here - enforcing the boundary the standalone app
+# will reuse. The host (this plugin) injects logging via nyan_set_log_sink.
+add_library(nyan_core STATIC
+  src/core/nyan_log.cpp
+  src/core/nyan_paths.cpp
+  src/core/nyan_host.cpp
+  src/core/nyan_json.cpp
+  src/core/glasses_display.cpp
+  src/core/device_registry.cpp
+  src/core/device_manager.cpp
+  src/core/hid_io.cpp
+  src/core/monitor_enum.cpp
+  src/core/wall_layout.cpp
+  src/core/ws_server.cpp
+  src/core/remote_schema.cpp
+  src/core/remote_control.cpp
+  src/core/transports/xreal_tcp.cpp
+  src/core/transports/xreal_air.cpp
+  src/core/transports/rayneo.cpp
+  src/core/transports/moverio.cpp
+  src/core/transports/rokid.cpp
+  src/core/transports/viture.cpp
+  src/core/transports/nreal_light.cpp)
+target_include_directories(nyan_core PUBLIC "${CMAKE_SOURCE_DIR}/src/core")
+target_compile_features(nyan_core PUBLIC cxx_std_20)
+if(MSVC)
+  target_compile_definitions(nyan_core PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(nyan_core PRIVATE /utf-8 /EHsc)
+endif()
+
 add_library(obs-nyan-real-3dof MODULE)
 target_sources(obs-nyan-real-3dof PRIVATE
   src/plugin-main.cpp
   src/cursor_fence.cpp
-  src/device_manager.cpp
-  src/device_registry.cpp
-  src/hid_io.cpp
+  src/device_settings_obs.cpp
   src/dock.cpp
   src/virtual_source.cpp
   src/display-wall-source.cpp
   src/audio-wall-source.cpp
-  src/ws_server.cpp
-  src/remote_control.cpp
-  src/remote_schema.cpp
   src/qrcodegen/qrcodegen.cpp
-  src/spatial_audio_filter.cpp
-  src/transports/xreal_tcp.cpp
-  src/transports/xreal_air.cpp
-  src/transports/rayneo.cpp
-  src/transports/moverio.cpp
-  src/transports/rokid.cpp
-  src/transports/viture.cpp
-  src/transports/nreal_light.cpp)
+  src/spatial_audio_filter.cpp)
 
 target_include_directories(obs-nyan-real-3dof PRIVATE
   "${OBS_SRC}/libobs"
@@ -48,6 +68,7 @@ target_include_directories(obs-nyan-real-3dof PRIVATE
   "${CMAKE_SOURCE_DIR}/deps/gen")
 
 target_link_libraries(obs-nyan-real-3dof PRIVATE
+  nyan_core
   "${OBS_LIB}"
   "${OBS_FRONTEND_LIB}"
   Ws2_32

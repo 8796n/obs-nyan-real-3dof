@@ -39,6 +39,7 @@
 
 #include "audio-wall-source.h"
 #include "display-wall-source.h"
+#include "nyan_json.h"
 #include "spatial_pan.h"
 #include "tooltip_util.h"
 #include "ws_server.h"
@@ -681,14 +682,14 @@ void release_ws_stream_locked(audio_wall_engine *wall, ws_stream &st)
 		obs_source_release(st.filter);
 }
 
-void wall_ws_text(audio_wall_engine *wall, uint64_t conn, obs_data_t *msg)
+void wall_ws_text(audio_wall_engine *wall, uint64_t conn, const nyan_json &msg)
 {
-	const char *type = obs_data_get_string(msg, "type");
+	const std::string type = nyan_json_get_string(msg, "type");
 	const uint64_t key = (conn << 32) |
-			     (static_cast<uint64_t>(obs_data_get_int(
+			     (static_cast<uint64_t>(nyan_json_get_int(
 				      msg, "stream")) &
 			      0xFFFFFFFFULL);
-	if (type && strcmp(type, "close") == 0) {
+	if (type == "close") {
 		std::lock_guard<std::mutex> lk(wall->children_mutex);
 		auto it = wall->ws_streams.find(key);
 		if (it != wall->ws_streams.end()) {
@@ -703,11 +704,11 @@ void wall_ws_text(audio_wall_engine *wall, uint64_t conn, obs_data_t *msg)
 		}
 		return;
 	}
-	if (!type || strcmp(type, "meta") != 0)
+	if (type != "meta")
 		return;
 
 	std::lock_guard<std::mutex> lk(wall->children_mutex);
-	const long long proto = obs_data_get_int(msg, "v");
+	const long long proto = nyan_json_get_int(msg, "v");
 	if (proto != WS_PROTOCOL_VERSION) {
 		if (wall->ws_proto_mismatch.exchange(
 			    proto, std::memory_order_relaxed) != proto)
@@ -725,18 +726,18 @@ void wall_ws_text(audio_wall_engine *wall, uint64_t conn, obs_data_t *msg)
 	}
 	ws_stream &st = wall->ws_streams[key];
 	st.norm_x = static_cast<float>(
-		clampd(obs_data_get_double(msg, "norm_x"), -0.5, 0.5));
-	const char *label = obs_data_get_string(msg, "label");
-	if (label && *label && st.label != label) {
+		clampd(nyan_json_get_double(msg, "norm_x"), -0.5, 0.5));
+	const std::string label = nyan_json_get_string(msg, "label");
+	if (!label.empty() && st.label != label) {
 		st.label = label;
 		wall->props_dirty.store(true, std::memory_order_relaxed);
 	}
-	const long long sr = obs_data_get_int(msg, "sample_rate");
+	const long long sr = nyan_json_get_int(msg, "sample_rate");
 	if (sr >= 8000 && sr <= 192000)
 		st.sample_rate = static_cast<uint32_t>(sr);
-	st.channels = obs_data_get_int(msg, "channels") == 1 ? 1 : 2;
-	const char *exe = obs_data_get_string(msg, "exe");
-	if (exe && *exe)
+	st.channels = nyan_json_get_int(msg, "channels") == 1 ? 1 : 2;
+	const std::string exe = nyan_json_get_string(msg, "exe");
+	if (!exe.empty())
 		st.exe = to_lower(exe);
 	st.last_rx_ns = os_gettime_ns();
 
@@ -838,7 +839,7 @@ void wall_ws_closed(audio_wall_engine *wall, uint64_t conn)
 void start_ws_server(audio_wall_engine *wall, uint16_t port)
 {
 	ws_server_callbacks cb;
-	cb.on_text = [wall](uint64_t conn, obs_data_t *msg) {
+	cb.on_text = [wall](uint64_t conn, const nyan_json &msg) {
 		wall_ws_text(wall, conn, msg);
 	};
 	cb.on_binary = [wall](uint64_t conn, const uint8_t *data, size_t len) {

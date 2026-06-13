@@ -210,6 +210,10 @@ so the edges stay readable.
 - `Fullscreen on glasses` is grayed out → the dock's `Glasses display` row
   shows `not detected`; the panel's EDID is not recognized — add
   `edid_vendor` / `edid_product` to `devices.json`
+- Only a specific app or video shows up black → it is DRM-protected content
+  (Netflix, Amazon Prime Video, Disney+, etc.). Windows output protection makes
+  it **uncapturable by design** (see the DRM note under "Display Wall"; there is
+  no workaround)
 
 ## Display Wall
 
@@ -231,6 +235,15 @@ excludes any display whose EDID identifies it as supported AR glasses
 displays by detected number or name, or uncheck `Include primary display` to
 drop the primary. Detected display numbers follow the numbers shown by Windows
 Identify.
+
+> **DRM-protected content does not appear (it shows up black).** Protected
+> playback such as Netflix, Amazon Prime Video, or Disney+ **cannot be captured
+> by design** — Windows output protection renders it black. This is not a plugin
+> bug: it is copyright protection enforced jointly by the OS and the playback
+> app, and OBS's ordinary display/window capture shows it black too. There is
+> **no option to bypass** the protection and capture it; doing so would be
+> circumventing a technological protection measure. Non-protected apps and
+> windows, and local videos you own, capture without any issue.
 
 `Match OBS output size to Display Wall` updates the OBS base canvas and output
 resolution after the Display Wall combined size changes. It is only needed when
