@@ -50,6 +50,7 @@
 #include "device_manager.h"
 #include "device_registry.h"
 #include "display-wall-source.h"
+#include "monitor_enum.h"
 #include "qrcodegen/qrcodegen.hpp"
 #include "remote_control.h"
 #include "tooltip_util.h"

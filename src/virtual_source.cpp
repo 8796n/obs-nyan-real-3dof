@@ -603,26 +603,6 @@ static bool virtual_source_capture_target(nyan_real_virtual_source *s, uint32_t 
 	return true;
 }
 
-// SBS output: the glasses display runs a double-wide side-by-side mode
-// (e.g. 3840x1080, left half = left eye), so the warped view is rendered
-// once per eye into each half. 0 = auto: follow the actual glasses display
-// mode, treating anything at least three times as wide as tall as SBS
-// (16:9 and 16:10 panels doubled give 3.56 / 3.2; ordinary monitors stay
-// well below). Manual ON covers half-SBS, which is not detectable from the
-// mode; the EDID-gated glasses display detection keeps ultrawide desktop
-// monitors out of the auto path.
-bool sbs_output_active(uint32_t output_w, uint32_t output_h)
-{
-	const int mode = g_device.sbs_output.load(std::memory_order_relaxed);
-	if (mode == 1)
-		return true;
-	if (mode == 2)
-		return false;
-	const uint32_t glasses_w =
-		g_glasses_display_width.load(std::memory_order_relaxed);
-	return glasses_w != 0 && output_h != 0 && output_w >= output_h * 3;
-}
-
 static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *tex,
 				     uint32_t source_w, uint32_t source_h)
 {

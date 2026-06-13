@@ -15,13 +15,18 @@
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 
+#include <cstdarg>
 #include <thread>
 
 #include "audio-wall-source.h"
 #include "device_manager.h"
 #include "device_registry.h"
+#include "device_settings_obs.h"
 #include "display-wall-source.h"
 #include "dock.h"
+#include "nyan_host.h"
+#include "nyan_log.h"
+#include "nyan_paths.h"
 #include "nyan_types.h"
 #include "remote_control.h"
 #include "spatial_audio_filter.h"
@@ -37,8 +42,59 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 static obs_hotkey_id g_recenter_hotkey_id = OBS_INVALID_HOTKEY_ID;
 
+// Route core (OBS-independent) logging into the OBS log. Core uses its own
+// NYAN_LOG_* values, so map them to libobs LOG_* here rather than assuming a
+// shared numbering.
+static void nyan_obs_log_sink(int level, const char *fmt, va_list args)
+{
+	int obs_level;
+	switch (level) {
+	case NYAN_LOG_ERROR:
+		obs_level = LOG_ERROR;
+		break;
+	case NYAN_LOG_WARNING:
+		obs_level = LOG_WARNING;
+		break;
+	case NYAN_LOG_DEBUG:
+		obs_level = LOG_DEBUG;
+		break;
+	default:
+		obs_level = LOG_INFO;
+		break;
+	}
+	blogva(obs_level, fmt, args);
+}
+
+// Resolve core file lookups to OBS module paths: config dir for writable files
+// (devices.json), the bundled data dir for read-only assets (remote.html).
+static std::string nyan_obs_config_path(const char *filename)
+{
+	char *p = obs_module_config_path(filename);
+	std::string s = p ? p : "";
+	bfree(p);
+	return s;
+}
+static std::string nyan_obs_asset_path(const char *filename)
+{
+	char *p = obs_module_file(filename);
+	std::string s = p ? p : "";
+	bfree(p);
+	return s;
+}
+
+// Forward core's audio-output enumeration to OBS's monitoring-device enum.
+static void nyan_obs_enum_audio(nyan_audio_output_cb cb, void *data)
+{
+	obs_enum_audio_monitoring_devices(cb, data);
+}
+
 bool obs_module_load(void)
 {
+	nyan_set_log_sink(nyan_obs_log_sink);
+	nyan_set_path_resolvers(nyan_obs_config_path, nyan_obs_asset_path);
+	nyan_set_text_provider(obs_module_text);
+	nyan_set_locale_provider(obs_get_locale);
+	nyan_set_audio_output_enumerator(nyan_obs_enum_audio);
 	init_device_registry();
 
 	register_nyan_real_virtual_source();
