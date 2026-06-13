@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 8796n <info@8796.jp>
 // Keeps the mouse cursor off the EDID-identified glasses display while a
 // projector covers it. A low-level mouse hook tunnels the cursor through to

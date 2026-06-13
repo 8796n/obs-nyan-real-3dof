@@ -1,12 +1,12 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 8796n <info@8796.jp>
 #include "cursor_fence.h"
 
 #include <windows.h>
 
-#include <obs-module.h>
-
 #include <atomic>
+
+#include "nyan_log.h"
 
 // Marks our own injected warp events so the hook passes them through instead
 // of fencing them again.
@@ -181,7 +181,7 @@ static void lower_fence()
 	if (g_fence_hook) {
 		UnhookWindowsHookEx(g_fence_hook);
 		g_fence_hook = nullptr;
-		blog(LOG_INFO, "[obs-nyan-real-3dof] cursor fence disabled");
+		nyan_log(NYAN_LOG_INFO, "[obs-nyan-real-3dof] cursor fence disabled");
 	}
 }
 
@@ -211,12 +211,12 @@ void cursor_fence_update(bool enabled, bool has_rect, long left, long top,
 		g_fence_hook = SetWindowsHookExW(WH_MOUSE_LL, fence_hook_proc,
 						 GetModuleHandleW(nullptr), 0);
 		if (g_fence_hook)
-			blog(LOG_INFO,
+			nyan_log(NYAN_LOG_INFO,
 			     "[obs-nyan-real-3dof] cursor fence enabled "
 			     "(%ld,%ld)-(%ld,%ld)",
 			     left, top, right, bottom);
 		else
-			blog(LOG_WARNING,
+			nyan_log(NYAN_LOG_WARNING,
 			     "[obs-nyan-real-3dof] cursor fence hook failed "
 			     "(error %lu)",
 			     GetLastError());

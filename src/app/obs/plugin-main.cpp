@@ -23,7 +23,7 @@
 #include "device_registry.h"
 #include "device_settings_obs.h"
 #include "display-wall-source.h"
-#include "dock.h"
+#include "dock_host_obs.h"
 #include "nyan_host.h"
 #include "nyan_log.h"
 #include "nyan_paths.h"
@@ -88,6 +88,27 @@ static void nyan_obs_enum_audio(nyan_audio_output_cb cb, void *data)
 	obs_enum_audio_monitoring_devices(cb, data);
 }
 
+// Bridge core's audio-monitor hooks to OBS's monitoring-device control.
+static void nyan_obs_audio_monitor_get(std::string &name, std::string &id)
+{
+	const char *n = nullptr;
+	const char *i = nullptr;
+	obs_get_audio_monitoring_device(&n, &i);
+	name = n ? n : "";
+	id = i ? i : "";
+}
+
+static bool nyan_obs_audio_monitor_set(const std::string &name,
+				       const std::string &id)
+{
+	return obs_set_audio_monitoring_device(name.c_str(), id.c_str());
+}
+
+static void nyan_obs_audio_monitor_reset()
+{
+	obs_reset_audio_monitoring();
+}
+
 bool obs_module_load(void)
 {
 	nyan_set_log_sink(nyan_obs_log_sink);
@@ -95,6 +116,10 @@ bool obs_module_load(void)
 	nyan_set_text_provider(obs_module_text);
 	nyan_set_locale_provider(obs_get_locale);
 	nyan_set_audio_output_enumerator(nyan_obs_enum_audio);
+	nyan_set_audio_monitor_getter(nyan_obs_audio_monitor_get);
+	nyan_set_audio_monitor_setter(nyan_obs_audio_monitor_set);
+	nyan_set_audio_monitor_resetter(nyan_obs_audio_monitor_reset);
+	register_dock_host_obs();
 	init_device_registry();
 
 	register_nyan_real_virtual_source();

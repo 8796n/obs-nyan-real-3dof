@@ -1,11 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 8796n <info@8796.jp>
 #include "dock.h"
 
 #include <windows.h>
-
-#include <obs-frontend-api.h>
-#include <obs-module.h>
 
 #ifdef NYAN_REAL_3DOF_WITH_QT_DOCK
 #include <QAbstractItemView>
@@ -49,44 +46,18 @@
 #include "cursor_fence.h"
 #include "device_manager.h"
 #include "device_registry.h"
-#include "display-wall-source.h"
 #include "monitor_enum.h"
-#include "qrcodegen/qrcodegen.hpp"
+#include "nyan_host.h"
+#include "nyan_log.h"
+#include "qrcodegen.hpp"
 #include "remote_control.h"
 #include "tooltip_util.h"
-#include "virtual_source.h"
 
 #ifdef NYAN_REAL_3DOF_WITH_QT_DOCK
 // Word-wrapping tooltip from a locale key (see tooltip_util.h).
 static QString tip(const char *locale_key)
 {
 	return QString::fromStdString(wrapped_tooltip(locale_key));
-}
-
-// First nyan Real virtual screen source, used as the projector content.
-static bool find_virtual_source_name(std::string &name_out)
-{
-	struct ctx_t {
-		std::string name;
-		bool found = false;
-	} ctx;
-	obs_enum_sources(
-		[](void *param, obs_source_t *src) {
-			auto *c = static_cast<ctx_t *>(param);
-			if (!is_virtual_source_id(obs_source_get_id(src)) ||
-			    obs_source_removed(src))
-				return true;
-			const char *n = obs_source_get_name(src);
-			if (!n || !*n)
-				return true;
-			c->name = n;
-			c->found = true;
-			return false;
-		},
-		&ctx);
-	if (ctx.found)
-		name_out = ctx.name;
-	return ctx.found;
 }
 
 // OBS resolves the fullscreen-projector monitor argument as an index into
@@ -147,42 +118,14 @@ static int projector_monitor_index(const nyan_real_glasses_display_info &display
 	return name_matches > 0 ? name_index : -1;
 }
 
-// Projector windows are OBS's own QWidget top-levels of class OBSProjector.
-static QList<QWidget *> projectors_on_screen(QScreen *screen)
-{
-	QList<QWidget *> out;
-	if (!screen)
-		return out;
-	const QList<QWidget *> widgets = QApplication::topLevelWidgets();
-	for (QWidget *widget : widgets) {
-		if (strcmp(widget->metaObject()->className(), "OBSProjector") !=
-		    0)
-			continue;
-		if (widget->screen() != screen)
-			continue;
-		out.append(widget);
-	}
-	return out;
-}
-
-// Close existing projector windows on the target screen so the dock button
-// and the auto-open never stack projectors. obs_frontend_open_projector opens
-// a new window on every call, and OBS only deduplicates when the user enabled
-// "Limit one fullscreen projector per screen".
-static void close_projectors_on_screen(QScreen *screen)
-{
-	for (QWidget *widget : projectors_on_screen(screen))
-		widget->close();
-}
-
-// Opens the virtual screen's fullscreen source projector on the glasses
-// display. UI thread only.
+// Opens the virtual screen's fullscreen output on the glasses display via the
+// host (OBS: source projector; standalone: own fullscreen window). UI thread.
 static bool open_glasses_source_projector(bool log_failure)
 {
 	nyan_real_glasses_display_info display;
 	if (!nyan_real_find_glasses_display(&display)) {
 		if (log_failure)
-			blog(LOG_WARNING,
+			nyan_log(NYAN_LOG_WARNING,
 			     "[obs-nyan-real-3dof] no glasses display present (EDID match)");
 		return false;
 	}
@@ -195,7 +138,7 @@ static bool open_glasses_source_projector(bool log_failure)
 				screen_names += screen->name().toStdString();
 				screen_names += "' ";
 			}
-			blog(LOG_WARNING,
+			nyan_log(NYAN_LOG_WARNING,
 			     "[obs-nyan-real-3dof] glasses display %s ('%s') not matched; Qt screens: %s",
 			     display.gdi_device.c_str(),
 			     display.friendly_name.c_str(),
@@ -203,21 +146,7 @@ static bool open_glasses_source_projector(bool log_failure)
 		}
 		return false;
 	}
-	std::string source_name;
-	if (!find_virtual_source_name(source_name)) {
-		if (log_failure)
-			blog(LOG_WARNING,
-			     "[obs-nyan-real-3dof] no virtual screen source exists; add one before opening the projector");
-		return false;
-	}
-	close_projectors_on_screen(QGuiApplication::screens().value(monitor));
-	obs_frontend_open_projector("Source", monitor, nullptr,
-				    source_name.c_str());
-	blog(LOG_INFO,
-	     "[obs-nyan-real-3dof] opened source projector '%s' on %s (%s, monitor %d)",
-	     source_name.c_str(), display.friendly_name.c_str(),
-	     display.gdi_device.c_str(), monitor);
-	return true;
+	return nyan_open_glasses_output(monitor, log_failure);
 }
 
 // Brand tokens that appear in the glasses' USB audio endpoint names
@@ -251,7 +180,7 @@ struct monitoring_device_match {
 static monitoring_device_match find_glasses_monitoring_device()
 {
 	monitoring_device_match m;
-	obs_enum_audio_monitoring_devices(
+	nyan_enum_audio_outputs(
 		[](void *data, const char *name, const char *id) {
 			auto *m = static_cast<monitoring_device_match *>(data);
 			if (!is_glasses_audio_name(name))
@@ -277,7 +206,7 @@ find_monitoring_device_by_id(const std::string &want_id)
 	} c = {&want_id, {}};
 	if (want_id.empty())
 		return c.m;
-	obs_enum_audio_monitoring_devices(
+	nyan_enum_audio_outputs(
 		[](void *data, const char *name, const char *id) {
 			auto *c = static_cast<ctx_t *>(data);
 			if (!id || *c->want != id)
@@ -297,10 +226,10 @@ find_monitoring_device_by_id(const std::string &want_id)
 static bool apply_monitoring_device(const monitoring_device_match &m,
 				    const char *why)
 {
-	const char *cur_name = nullptr;
-	const char *cur_id = nullptr;
-	obs_get_audio_monitoring_device(&cur_name, &cur_id);
-	if (cur_id && m.id == cur_id) {
+	std::string cur_name;
+	std::string cur_id;
+	nyan_audio_monitor_get(cur_name, cur_id);
+	if (!cur_id.empty() && m.id == cur_id) {
 		// Already the configured device - but monitors created while
 		// the endpoint was still enumerating (OBS launch racing the
 		// glasses' USB audio, Bluetooth reconnecting) failed with
@@ -308,15 +237,15 @@ static bool apply_monitoring_device(const monitoring_device_match &m,
 		// its own. The endpoint provably exists right now (it was
 		// just enumerated), so rebuild all monitors against it. Runs
 		// once per appearance via the caller's latch.
-		obs_reset_audio_monitoring();
-		blog(LOG_INFO,
+		nyan_audio_monitor_reset();
+		nyan_log(NYAN_LOG_INFO,
 		     "[obs-nyan-real-3dof] audio monitoring re-initialized ('%s' is ready)",
 		     m.name.c_str());
 		return true;
 	}
-	if (!obs_set_audio_monitoring_device(m.name.c_str(), m.id.c_str()))
+	if (!nyan_audio_monitor_set(m.name, m.id))
 		return false;
-	blog(LOG_INFO,
+	nyan_log(NYAN_LOG_INFO,
 	     "[obs-nyan-real-3dof] audio monitoring device -> '%s' (%s)",
 	     m.name.c_str(), why);
 	return true;
@@ -490,8 +419,8 @@ public:
 		connect_box->setToolTip(
 			tip("dock.pose_follow_tooltip"));
 		auto *action_row_1 = new QHBoxLayout();
-		auto *recenter = new QPushButton(obs_module_text("recenter"), content);
-		auto *recalibrate = new QPushButton(obs_module_text("recalibrate"), content);
+		auto *recenter = new QPushButton(nyan_text("recenter"), content);
+		auto *recalibrate = new QPushButton(nyan_text("recalibrate"), content);
 		recenter->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 		recalibrate->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 		action_row_1->addWidget(connect_box);
@@ -509,15 +438,15 @@ public:
 		stream_label = new QLabel(status_body);
 		pose_label = new QLabel(status_body);
 		virtual_label = new QLabel(status_body);
-		status_form->addRow(obs_module_text("dock.hid"), hid_label);
-		status_form->addRow(obs_module_text("dock.glasses_display"),
+		status_form->addRow(nyan_text("dock.hid"), hid_label);
+		status_form->addRow(nyan_text("dock.glasses_display"),
 				    glasses_display_label);
-		status_form->addRow(obs_module_text("dock.transport"), transport_label);
-		status_form->addRow(obs_module_text("dock.stream"), stream_label);
-		status_form->addRow(obs_module_text("dock.pose"), pose_label);
-		status_form->addRow(obs_module_text("dock.virtual_sources"),
+		status_form->addRow(nyan_text("dock.transport"), transport_label);
+		status_form->addRow(nyan_text("dock.stream"), stream_label);
+		status_form->addRow(nyan_text("dock.pose"), pose_label);
+		status_form->addRow(nyan_text("dock.virtual_sources"),
 				    virtual_label);
-		status_section = new DockSection(obs_module_text("dock.status"),
+		status_section = new DockSection(nyan_text("dock.status"),
 						 status_body, content);
 		root->addWidget(status_section);
 
@@ -535,29 +464,29 @@ public:
 						    BRIGHTNESS_SLIDER_SCALE);
 		brightness_row->setToolTip(
 			tip("brightness_tooltip"));
-		device_form->addRow(obs_module_text("brightness"),
+		device_form->addRow(nyan_text("brightness"),
 				    brightness_row);
-		autobright_box = new QCheckBox(obs_module_text("autobright"),
+		autobright_box = new QCheckBox(nyan_text("autobright"),
 					       device_body);
 		autobright_box->setToolTip(
 			tip("autobright_tooltip"));
 		device_form->addRow(autobright_box);
 		convergence_box = new QCheckBox(
-			obs_module_text("convergence_link"), device_body);
+			nyan_text("convergence_link"), device_body);
 		convergence_box->setToolTip(
 			tip("convergence_link_tooltip"));
 		device_form->addRow(convergence_box);
 		display_mode_combo = new NoWheelComboBox(device_body);
 		display_mode_combo->setToolTip(
 			tip("displaymode_tooltip"));
-		device_form->addRow(obs_module_text("displaymode"),
+		device_form->addRow(nyan_text("displaymode"),
 				    display_mode_combo);
 		eye_label = new QLabel(device_body);
-		device_form->addRow(obs_module_text("dock.eye"), eye_label);
+		device_form->addRow(nyan_text("dock.eye"), eye_label);
 		eye_button = new QPushButton(device_body);
 		eye_button->setToolTip(tip("dock.eye_tooltip"));
 		device_form->addRow(eye_button);
-		device_section = new DockSection(obs_module_text("dock.device"),
+		device_section = new DockSection(nyan_text("dock.device"),
 						 device_body, content);
 		root->addWidget(device_section);
 
@@ -565,32 +494,32 @@ public:
 		auto *output_form = new QFormLayout(output_body);
 		output_form->setContentsMargins(16, 0, 0, 4);
 		projector_button = new QPushButton(
-			obs_module_text("dock.open_projector"), output_body);
+			nyan_text("dock.open_projector"), output_body);
 		projector_button->setToolTip(
 			tip("dock.open_projector_tooltip"));
 		output_form->addRow(projector_button);
 		auto_projector_box = new QCheckBox(
-			obs_module_text("dock.auto_projector"), output_body);
+			nyan_text("dock.auto_projector"), output_body);
 		auto_projector_box->setToolTip(
 			tip("dock.auto_projector_tooltip"));
 		output_form->addRow(auto_projector_box);
 		sbs_combo = new NoWheelComboBox(output_body);
-		sbs_combo->addItem(obs_module_text("sbs_output.auto"), 0);
-		sbs_combo->addItem(obs_module_text("sbs_output.on"), 1);
-		sbs_combo->addItem(obs_module_text("sbs_output.off"), 2);
+		sbs_combo->addItem(nyan_text("sbs_output.auto"), 0);
+		sbs_combo->addItem(nyan_text("sbs_output.on"), 1);
+		sbs_combo->addItem(nyan_text("sbs_output.off"), 2);
 		sbs_combo->setToolTip(tip("sbs_output_tooltip"));
-		output_form->addRow(obs_module_text("sbs_output"), sbs_combo);
+		output_form->addRow(nyan_text("sbs_output"), sbs_combo);
 		monitor_combo = new NoWheelComboBox(output_body);
 		monitor_combo->setToolTip(
 			tip("dock.monitor_out_tooltip"));
-		output_form->addRow(obs_module_text("dock.monitor_out"),
+		output_form->addRow(nyan_text("dock.monitor_out"),
 				    monitor_combo);
 		cursor_fence_box = new QCheckBox(
-			obs_module_text("dock.cursor_fence"), output_body);
+			nyan_text("dock.cursor_fence"), output_body);
 		cursor_fence_box->setToolTip(
 			tip("dock.cursor_fence_tooltip"));
 		output_form->addRow(cursor_fence_box);
-		output_section = new DockSection(obs_module_text("dock.output"),
+		output_section = new DockSection(nyan_text("dock.output"),
 						 output_body, content);
 		root->addWidget(output_section);
 
@@ -601,7 +530,7 @@ public:
 		prediction_spin->setRange(0.0, 50.0);
 		prediction_spin->setDecimals(0);
 		prediction_spin->setSingleStep(1.0);
-		fov_auto_box = new QCheckBox(obs_module_text("fov_auto"), screen_body);
+		fov_auto_box = new QCheckBox(nyan_text("fov_auto"), screen_body);
 		fov_spin = new NoWheelDoubleSpinBox(screen_body);
 		fov_spin->setRange(20.0, 100.0);
 		fov_spin->setDecimals(0);
@@ -624,12 +553,12 @@ public:
 		ipd_spin->setDecimals(1);
 		ipd_spin->setSingleStep(0.5);
 		screen_label = new QLabel(screen_body);
-		screen_form->addRow(obs_module_text("prediction_ms"),
+		screen_form->addRow(nyan_text("prediction_ms"),
 				    make_double_slider(screen_body, prediction_spin,
 						       &prediction_slider,
 						       PREDICTION_SLIDER_SCALE));
 		screen_form->addRow(fov_auto_box);
-		screen_form->addRow(obs_module_text("fov_deg"),
+		screen_form->addRow(nyan_text("fov_deg"),
 				    make_double_slider(screen_body, fov_spin, &fov_slider,
 						       FOV_SLIDER_SCALE));
 		distance_row = make_double_slider(screen_body, distance_spin,
@@ -639,20 +568,20 @@ public:
 		// optical focal distance as SBS comfort guidance.
 		distance_row->setToolTip(
 			tip("screen_distance_tooltip"));
-		screen_form->addRow(obs_module_text("screen_distance_m"),
+		screen_form->addRow(nyan_text("screen_distance_m"),
 				    distance_row);
-		screen_form->addRow(obs_module_text("screen_size_factor"),
+		screen_form->addRow(nyan_text("screen_size_factor"),
 				    make_double_slider(screen_body, size_spin, &size_slider,
 						       SIZE_SLIDER_SCALE));
-		screen_form->addRow(obs_module_text("screen_curve"),
+		screen_form->addRow(nyan_text("screen_curve"),
 				    make_double_slider(screen_body, curve_spin, &curve_slider,
 						       CURVE_SLIDER_SCALE));
 		auto *ipd_row = make_double_slider(screen_body, ipd_spin,
 						   &ipd_slider, IPD_SLIDER_SCALE);
 		ipd_row->setToolTip(tip("ipd_tooltip"));
-		screen_form->addRow(obs_module_text("ipd_mm"), ipd_row);
-		screen_form->addRow(obs_module_text("dock.screen_result"), screen_label);
-		screen_section = new DockSection(obs_module_text("dock.screen"),
+		screen_form->addRow(nyan_text("ipd_mm"), ipd_row);
+		screen_form->addRow(nyan_text("dock.screen_result"), screen_label);
+		screen_section = new DockSection(nyan_text("dock.screen"),
 						 screen_body, content);
 		root->addWidget(screen_section);
 
@@ -663,13 +592,13 @@ public:
 		auto *remote_form = new QFormLayout(remote_body);
 		remote_form->setContentsMargins(16, 0, 0, 4);
 		remote_enable_box = new QCheckBox(
-			obs_module_text("dock.remote_enable"), remote_body);
+			nyan_text("dock.remote_enable"), remote_body);
 		remote_enable_box->setToolTip(
 			tip("dock.remote_enable_tooltip"));
 		remote_form->addRow(remote_enable_box);
 		remote_port_spin = new NoWheelSpinBox(remote_body);
 		remote_port_spin->setRange(1024, 65535);
-		remote_form->addRow(obs_module_text("dock.remote_port"),
+		remote_form->addRow(nyan_text("dock.remote_port"),
 				    remote_port_spin);
 		remote_qr_label = new ClickableLabel(remote_body);
 		remote_qr_label->setAlignment(Qt::AlignCenter);
@@ -685,13 +614,13 @@ public:
 		remote_url_label->setVisible(false);
 		remote_form->addRow(remote_url_label);
 		remote_kick_button = new QPushButton(
-			obs_module_text("dock.remote_kick"), remote_body);
+			nyan_text("dock.remote_kick"), remote_body);
 		remote_kick_button->setToolTip(
 			tip("dock.remote_kick_tooltip"));
 		remote_kick_button->setVisible(false);
 		remote_form->addRow(remote_kick_button);
 		remote_section = new DockSection(
-			obs_module_text("dock.remote"), remote_body, content);
+			nyan_text("dock.remote"), remote_body, content);
 		root->addWidget(remote_section);
 
 		// Rarely-touched settings, collapsed by default. The One-family
@@ -702,19 +631,19 @@ public:
 		ip_edit = new QLineEdit(advanced_body);
 		port_spin = new NoWheelSpinBox(advanced_body);
 		port_spin->setRange(1, 65535);
-		advanced_form->addRow(obs_module_text("ip"), ip_edit);
-		advanced_form->addRow(obs_module_text("port"), port_spin);
-		mag_yaw_box = new QCheckBox(obs_module_text("mag_yaw"), advanced_body);
-		debug_box = new QCheckBox(obs_module_text("debug_log"), advanced_body);
+		advanced_form->addRow(nyan_text("ip"), ip_edit);
+		advanced_form->addRow(nyan_text("port"), port_spin);
+		mag_yaw_box = new QCheckBox(nyan_text("mag_yaw"), advanced_body);
+		debug_box = new QCheckBox(nyan_text("debug_log"), advanced_body);
 		// Resets every dock setting; lives at the bottom of the
 		// advanced section, away from the everyday tracker buttons.
 		auto *reset_defaults = new QPushButton(
-			obs_module_text("reset_defaults"), advanced_body);
+			nyan_text("reset_defaults"), advanced_body);
 		advanced_form->addRow(mag_yaw_box);
 		advanced_form->addRow(debug_box);
 		advanced_form->addRow(reset_defaults);
 		advanced_section = new DockSection(
-			obs_module_text("dock.advanced"), advanced_body, content);
+			nyan_text("dock.advanced"), advanced_body, content);
 		root->addWidget(advanced_section);
 		root->addStretch();
 		setWidget(content);
@@ -1109,14 +1038,14 @@ private:
 		}
 
 		hid_label->setText(detected == MODEL_UNKNOWN
-					   ? obs_module_text("detected_device.none")
+					   ? nyan_text("detected_device.none")
 					   : QString::fromStdString(
 						     profile_for(detected).name));
 		// Transport-specific rows (currently the One-family TCP endpoint)
 		// follow the detected device; nothing detected hides them all.
 		const imu_transport transport = profile_for(detected).transport;
 		transport_label->setText(
-			obs_module_text(traits_for(transport).name_key));
+			nyan_text(traits_for(transport).name_key));
 		if (static_cast<int>(transport) != last_transport) {
 			last_transport = static_cast<int>(transport);
 			const transport_traits tr = traits_for(transport);
@@ -1136,7 +1065,7 @@ private:
 				display_mode_combo->clear();
 				for (size_t i = 0; i < tr.display_mode_count; ++i)
 					display_mode_combo->addItem(
-						obs_module_text(
+						nyan_text(
 							tr.display_modes[i]
 								.label_key),
 						tr.display_modes[i].value);
@@ -1163,17 +1092,17 @@ private:
 					std::memory_order_relaxed) >= 0;
 			const char *eye_text;
 			if (eye_pending)
-				eye_text = obs_module_text("dock.eye.switching");
+				eye_text = nyan_text("dock.eye.switching");
 			else if (eye_present < 0)
-				eye_text = obs_module_text("dock.eye.unknown");
+				eye_text = nyan_text("dock.eye.unknown");
 			else if (eye_present == 0)
-				eye_text = obs_module_text("dock.eye.absent");
+				eye_text = nyan_text("dock.eye.absent");
 			else
-				eye_text = obs_module_text(
+				eye_text = nyan_text(
 					eye_uvc == 1 ? "dock.eye.uvc_on"
 						     : "dock.eye.uvc_off");
 			eye_label->setText(eye_text);
-			eye_button->setText(obs_module_text(
+			eye_button->setText(nyan_text(
 				eye_uvc == 1 ? "dock.eye.disable"
 					     : "dock.eye.enable"));
 			eye_button->setEnabled(eye_present == 1 &&
@@ -1236,17 +1165,17 @@ private:
 			convergence_box->setChecked(g_device.convergence_link.load(
 				std::memory_order_relaxed));
 		}
-		stream_label->setText(!enabled ? obs_module_text("dock.stream.disabled")
+		stream_label->setText(!enabled ? nyan_text("dock.stream.disabled")
 					       : (connected
-							  ? obs_module_text("dock.stream.connected")
-							  : obs_module_text("dock.stream.waiting")));
-		const char *pose_status = obs_module_text("dock.pose.disconnected");
+							  ? nyan_text("dock.stream.connected")
+							  : nyan_text("dock.stream.waiting")));
+		const char *pose_status = nyan_text("dock.pose.disconnected");
 		if (!enabled) {
-			pose_status = obs_module_text("dock.pose.disabled");
+			pose_status = nyan_text("dock.pose.disabled");
 		} else if (connected && p.connected) {
 			pose_status = p.calibrated
-					      ? obs_module_text("dock.pose.calibrated")
-					      : obs_module_text("dock.pose.calibrating");
+					      ? nyan_text("dock.pose.calibrated")
+					      : nyan_text("dock.pose.calibrating");
 		}
 		pose_label->setText(pose_status);
 		// Collapsed-status summary: green = tracking (calibrated),
@@ -1262,7 +1191,7 @@ private:
 						: "#f0ad4e";
 			const QString model_name =
 				detected == MODEL_UNKNOWN
-					? QString::fromUtf8(obs_module_text(
+					? QString::fromUtf8(nyan_text(
 						  "detected_device.none"))
 					: QString::fromStdString(
 						  profile_for(detected).name);
@@ -1322,7 +1251,7 @@ private:
 					  glasses.friendly_name.empty()
 						  ? glasses.gdi_device
 						  : glasses.friendly_name)
-				: QString(obs_module_text(
+				: QString(nyan_text(
 					  "dock.glasses_display.none")));
 		// Disabled (not hidden) so the feature stays discoverable; the
 		// "glasses display: not detected" status row explains why. The
@@ -1405,18 +1334,10 @@ private:
 				std::memory_order_relaxed));
 		}
 		if (!glasses_display_present) {
-			// Windows moves a removed display's windows onto the
-			// remaining monitors, which would leave the fullscreen
-			// projector covering a desktop screen. Close the
-			// projectors that were sitting on the glasses display
-			// instead, and re-arm the auto-open for the next
-			// connection.
-			for (const QPointer<QWidget> &projector :
-			     glasses_projectors) {
-				if (projector)
-					projector->close();
-			}
-			glasses_projectors.clear();
+			// Close the glasses output and re-arm the auto-open for
+			// the next connection (the host tears down the windows it
+			// tracked while the display was present).
+			nyan_close_glasses_output();
 			auto_projector_opened = false;
 		} else {
 			if (g_device.auto_projector.load(
@@ -1426,15 +1347,9 @@ private:
 				if (open_glasses_source_projector(false))
 					auto_projector_opened = true;
 			}
-			// Track every projector currently on the glasses
-			// screen (manually opened ones included) so they can
-			// be closed when the display disappears.
-			glasses_projectors.clear();
-			QScreen *glasses_screen = QGuiApplication::screens().value(
-				projector_monitor_index(glasses));
-			for (QWidget *projector :
-			     projectors_on_screen(glasses_screen))
-				glasses_projectors.append(projector);
+			// Let the host snapshot the glasses-screen output so it
+			// can be closed when the display disappears.
+			nyan_track_glasses_output(projector_monitor_index(glasses));
 		}
 
 		{
@@ -1489,10 +1404,10 @@ private:
 		if (focus_m != last_focus_tip_m) {
 			last_focus_tip_m = focus_m;
 			distance_row->setToolTip(QStringLiteral("<qt>%1 %2</qt>").arg(
-				QString::fromUtf8(obs_module_text(
+				QString::fromUtf8(nyan_text(
 					"screen_distance_tooltip")),
 				QString::asprintf(
-					obs_module_text(
+					nyan_text(
 						"screen_distance_focus_note"),
 					focus_m)));
 		}
@@ -1540,13 +1455,13 @@ private:
 			remote_qr_label->clear();
 			remote_qr_label->setVisible(false);
 			remote_url_label->setText(QString::asprintf(
-				obs_module_text("dock.remote_connected"),
+				nyan_text("dock.remote_connected"),
 				clients));
 			remote_url_label->setVisible(true);
 			remote_kick_button->setVisible(true);
 			summarize("#5cb85c",
 				  QString::asprintf(
-					  obs_module_text(
+					  nyan_text(
 						  "dock.remote_summary_connected"),
 					  clients));
 			return;
@@ -1556,20 +1471,20 @@ private:
 			remote_qr_label->clear();
 			remote_qr_label->setVisible(false);
 			remote_url_label->setText(
-				enabled ? obs_module_text(
+				enabled ? nyan_text(
 						  "dock.remote_unavailable")
 					: "");
 			remote_url_label->setVisible(enabled);
 			if (enabled)
 				summarize("#d9534f",
-					  QString::fromUtf8(obs_module_text(
+					  QString::fromUtf8(nyan_text(
 						  "dock.remote_summary_error")));
 			else
 				remote_section->set_summary(QString(),
 							    QString());
 			return;
 		}
-		summarize("#f0ad4e", QString::fromUtf8(obs_module_text(
+		summarize("#f0ad4e", QString::fromUtf8(nyan_text(
 					     "dock.remote_summary_waiting")));
 		// Crisp integer-scaled QR with a quiet zone; the white pad
 		// keeps it scannable on dark themes.
@@ -1618,13 +1533,13 @@ private:
 			QString name;
 		};
 		QList<entry_t> entries;
-		entries.append({QString::fromUtf8(obs_module_text(
+		entries.append({QString::fromUtf8(nyan_text(
 					 "dock.monitor_out.auto")),
 				QStringLiteral("@auto"), QString()});
-		entries.append({QString::fromUtf8(obs_module_text(
+		entries.append({QString::fromUtf8(nyan_text(
 					 "dock.monitor_out.keep")),
 				QStringLiteral("@keep"), QString()});
-		obs_enum_audio_monitoring_devices(
+		nyan_enum_audio_outputs(
 			[](void *data, const char *name, const char *id) {
 				auto *e = static_cast<QList<entry_t> *>(data);
 				const QString n =
@@ -1652,7 +1567,7 @@ private:
 				const QString name = QString::fromStdString(
 					sel_name.empty() ? sel_id : sel_name);
 				entries.append(
-					{name + QString::fromUtf8(obs_module_text(
+					{name + QString::fromUtf8(nyan_text(
 							"dock.monitor_out.missing_suffix")),
 					 QString::fromStdString(sel_id), name});
 				want_index = entries.size() - 1;
@@ -1756,44 +1671,13 @@ private:
 	// the endpoint disappears so its return re-applies the choice).
 	bool auto_monitor_applied = false;
 	bool monitor_device_applied = false;
-	// Projectors seen on the glasses screen; closed on display removal.
-	QList<QPointer<QWidget>> glasses_projectors;
 	QTimer *timer = nullptr;
 };
 
-void init_dock()
+// Creates the dock widget. The host shell registers it (OBS frontend dock or
+// the standalone's window); shared UI logic lives entirely in NyanRealDock.
+QWidget *create_nyan_real_dock(QWidget *parent)
 {
-	auto *parent = reinterpret_cast<QWidget *>(obs_frontend_get_main_window());
-	auto *widget = new NyanRealDock(parent);
-	if (!obs_frontend_add_dock_by_id("nyan_real_3dof_dock",
-					 obs_module_text("dock.title"), widget)) {
-		delete widget;
-		blog(LOG_ERROR,
-		     "[obs-nyan-real-3dof] failed to register dock UI; check for duplicate plugin instances");
-		return;
-	}
-	if (auto *dock = qobject_cast<QDockWidget *>(widget->parentWidget())) {
-		dock->setAllowedAreas(Qt::AllDockWidgetAreas);
-		dock->setFloating(false);
-	} else {
-		blog(LOG_WARNING,
-		     "[obs-nyan-real-3dof] dock UI registered, but QDockWidget parent was not found");
-	}
-	blog(LOG_INFO,
-	     "[obs-nyan-real-3dof] dock UI registered; enable it from the OBS Docks menu");
+	return new NyanRealDock(parent);
 }
-
-void shutdown_dock()
-{
-	cursor_fence_shutdown();
-	obs_frontend_remove_dock("nyan_real_3dof_dock");
-}
-#else
-void init_dock()
-{
-	blog(LOG_WARNING,
-	     "[obs-nyan-real-3dof] Qt was not available at build time; dock UI disabled");
-}
-
-void shutdown_dock() {}
 #endif

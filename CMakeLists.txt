@@ -51,21 +51,27 @@ if(MSVC)
 endif()
 
 add_library(obs-nyan-real-3dof MODULE)
+# app/obs = OBS module shell, platform/obs = OBS backend (sources/filters,
+# obs_data glue), platform/win = OBS-free Win32 shared with the standalone.
 target_sources(obs-nyan-real-3dof PRIVATE
-  src/plugin-main.cpp
-  src/cursor_fence.cpp
-  src/device_settings_obs.cpp
-  src/dock.cpp
-  src/virtual_source.cpp
-  src/display-wall-source.cpp
-  src/audio-wall-source.cpp
-  src/qrcodegen/qrcodegen.cpp
-  src/spatial_audio_filter.cpp)
+  src/app/obs/plugin-main.cpp
+  src/app/obs/dock_host_obs.cpp
+  src/platform/win/cursor_fence.cpp
+  src/platform/obs/device_settings_obs.cpp
+  src/platform/obs/virtual_source.cpp
+  src/platform/obs/display-wall-source.cpp
+  src/platform/obs/audio-wall-source.cpp
+  src/platform/obs/spatial_audio_filter.cpp
+  src/qrcodegen/qrcodegen.cpp)
 
 target_include_directories(obs-nyan-real-3dof PRIVATE
   "${OBS_SRC}/libobs"
   "${OBS_SRC}/frontend/api"
-  "${CMAKE_SOURCE_DIR}/deps/gen")
+  "${CMAKE_SOURCE_DIR}/deps/gen"
+  "${CMAKE_SOURCE_DIR}/src/app/obs"
+  "${CMAKE_SOURCE_DIR}/src/platform/obs"
+  "${CMAKE_SOURCE_DIR}/src/platform/win"
+  "${CMAKE_SOURCE_DIR}/src/qrcodegen")
 
 target_link_libraries(obs-nyan-real-3dof PRIVATE
   nyan_core
@@ -82,7 +88,26 @@ target_link_libraries(obs-nyan-real-3dof PRIVATE
   Advapi32)
 
 if(Qt6_FOUND)
-  target_link_libraries(obs-nyan-real-3dof PRIVATE Qt6::Widgets)
+  # nyan_ui: the shared dock widget (MIT, src/ui/). Qt + nyan_core, but no OBS
+  # include dirs - so the dock cannot accidentally reach libobs and can be
+  # reused by the standalone app. The host shell (OBS plugin or standalone)
+  # creates and hosts the widget. The private paths are the OBS-free helpers it
+  # still uses (platform/win cursor_fence.h, qrcodegen); their symbols resolve
+  # at the final link of the host.
+  add_library(nyan_ui STATIC src/ui/dock.cpp)
+  target_link_libraries(nyan_ui PUBLIC nyan_core PRIVATE Qt6::Widgets)
+  target_include_directories(nyan_ui
+    PUBLIC "${CMAKE_SOURCE_DIR}/src/ui"
+    PRIVATE "${CMAKE_SOURCE_DIR}/src/platform/win"
+            "${CMAKE_SOURCE_DIR}/src/qrcodegen")
+  target_compile_features(nyan_ui PUBLIC cxx_std_20)
+  target_compile_definitions(nyan_ui PRIVATE NYAN_REAL_3DOF_WITH_QT_DOCK=1)
+  if(MSVC)
+    target_compile_definitions(nyan_ui PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(nyan_ui PRIVATE /utf-8 /EHsc)
+  endif()
+
+  target_link_libraries(obs-nyan-real-3dof PRIVATE nyan_ui Qt6::Widgets)
   target_compile_definitions(obs-nyan-real-3dof PRIVATE NYAN_REAL_3DOF_WITH_QT_DOCK=1)
   message(STATUS "nyan Real 3DoF dock UI: enabled (Qt ${Qt6_VERSION})")
 else()
