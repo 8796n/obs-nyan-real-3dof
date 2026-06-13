@@ -1333,6 +1333,19 @@ private:
 			auto_projector_box->setChecked(g_device.auto_projector.load(
 				std::memory_order_relaxed));
 		}
+		// Requests from the phone remote's settings mirror that need
+		// the dock's Qt context (remote_schema rows park them on
+		// g_device; same consume pattern as brightness_request).
+		if (g_device.projector_request.exchange(
+			    false, std::memory_order_relaxed)) {
+			if (open_glasses_source_projector(true))
+				auto_projector_opened = true;
+		}
+		if (g_device.monitor_rearm.exchange(false,
+						    std::memory_order_relaxed)) {
+			auto_monitor_applied = false;
+			monitor_device_applied = false;
+		}
 		refresh_monitor_combo();
 		const int monitor_out =
 			g_device.monitor_out.load(std::memory_order_relaxed);

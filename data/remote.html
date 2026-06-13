@@ -60,12 +60,43 @@
     display: none; align-items: center; justify-content: center;
     padding: 24px; text-align: center; color: #c0463f; font-size: 15px; line-height: 1.8;
   }
+  #cfg {
+    position: absolute; inset: 0; background: #141417; z-index: 10;
+    display: none; flex-direction: column; color-scheme: dark;
+    padding: 10px;
+    padding-top: calc(10px + env(safe-area-inset-top));
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+  #cfg.on { display: flex; }
+  #cfg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  #cfg-head span { flex: 1; font-size: 16px; color: #d6d6dc; padding-left: 4px; }
+  #cfg-body {
+    flex: 1; overflow-y: auto; touch-action: pan-y; overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .cfg-sec { margin: 14px 4px 4px; font-size: 13px; color: #7e8aa0; border-bottom: 1px solid #2c3340; padding-bottom: 4px; }
+  .cfg-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 4px; border-bottom: 1px solid #1f1f24; font-size: 14px; }
+  .cfg-row.col { flex-direction: column; align-items: stretch; gap: 4px; }
+  .cfg-row .lab { color: #b9b9c2; }
+  .cfg-row .val { color: #8a8a94; text-align: right; }
+  .cfg-row.off { opacity: 0.45; pointer-events: none; }
+  .cfg-row input[type="range"] { width: 100%; margin: 2px 0; }
+  .cfg-row input[type="checkbox"] { width: 22px; height: 22px; flex: none; }
+  .cfg-row select, .cfg-row input[type="text"], .cfg-row input[type="number"] {
+    background: #222228; color: #d6d6dc; border: 1px solid #34343c;
+    border-radius: 8px; padding: 7px 8px; font-size: 14px; max-width: 60%;
+  }
+  .cfg-row input[type="text"], .cfg-row input[type="number"] {
+    -webkit-user-select: text; user-select: text;
+  }
+  .cfg-row button { padding: 9px 14px; font-size: 14px; }
 </style>
 </head>
 <body>
   <div id="top" class="row">
     <button id="btn-recenter">センター</button>
     <button id="btn-recal">再較正</button>
+    <button id="btn-cfg" style="flex:0 0 52px" aria-label="settings">⚙</button>
     <button id="btn-fs" style="flex:0 0 52px" aria-label="fullscreen">⛶</button>
   </div>
   <div id="mid">
@@ -80,7 +111,11 @@
        phone verify it got the new page without devtools. Tapping it fires a
        long test vibration - a bare navigator.vibrate() check, independent of
        any gesture logic. -->
-  <div id="status"><span id="dot"></span><span id="status-text">…</span><span id="rev" style="margin-left:auto;color:#3c3c44;font-size:10px;">r5</span></div>
+  <div id="status"><span id="dot"></span><span id="status-text">…</span><span id="rev" style="margin-left:auto;color:#3c3c44;font-size:10px;">r7</span></div>
+  <div id="cfg">
+    <div id="cfg-head"><span id="cfg-title"></span><button id="btn-cfg-close" style="flex:0 0 80px"></button></div>
+    <div id="cfg-body"></div>
+  </div>
   <div id="overlay"></div>
 <script>
 'use strict';
@@ -91,12 +126,14 @@ const L = jp ? {
   pad: 'タッチパッド',
   hint: '1本指: 移動 ・ タップ: 左クリック<br>長押し: ドラッグ (指を離しても一瞬なら継続)<br>2本指: スクロール ・ 2本指タップ: 右クリック',
   distLabel: '距離', conn: '接続中', disc: '再接続中…',
+  cfgTitle: '設定', close: '閉じる',
   noToken: 'アクセストークンがありません。<br>OBS の nyan Real 3DoF ドックに表示される QR コードからこのページを開いてください。',
 } : {
   recenter: 'Center', recal: 'Recalibrate',
   pad: 'Touchpad',
   hint: '1 finger: move / tap: left click<br>hold: drag (brief lifts keep it going)<br>2 fingers: scroll / 2-finger tap: right click',
   distLabel: 'Distance', conn: 'Connected', disc: 'Reconnecting…',
+  cfgTitle: 'Settings', close: 'Close',
   noToken: 'Missing access token.<br>Open this page from the QR code shown in the nyan Real 3DoF dock in OBS.',
 };
 $('btn-recenter').textContent = L.recenter;
@@ -104,6 +141,8 @@ $('btn-recal').textContent = L.recal;
 $('pad-title').textContent = L.pad;
 $('pad-hint').innerHTML = L.hint;
 $('dist-label').textContent = L.distLabel;
+$('cfg-title').textContent = L.cfgTitle;
+$('btn-cfg-close').textContent = L.close;
 
 const token = new URLSearchParams(location.search).get('t') || '';
 if (!token) {
@@ -136,6 +175,7 @@ function connect() {
       const m = JSON.parse(ev.data);
       if (m.t === 'state' && typeof m.dist === 'number')
         $('dist').textContent = m.dist.toFixed(2) + ' m';
+      else if (m.t === 'cfg' && Array.isArray(m.sections)) { cfgData = m; renderCfg(); }
     } catch (e) {}
   };
 }
@@ -296,6 +336,139 @@ strip.addEventListener('pointercancel', stripEnd);
 $('btn-recenter').addEventListener('click', () => { send({ t: 'recenter' }); vibrate(20); });
 $('btn-recal').addEventListener('click', () => { send({ t: 'recal' }); vibrate(20); });
 
+/* Settings mirror: a generic renderer over the cfg snapshot the plugin
+   pushes (sections/rows with type, localized label, value, options). The
+   page knows no individual setting - add/remove rows in src/remote_schema
+   only. Rows touched in the last moments are not stomped by pushes. */
+let cfgData = null, cfgSig = '';
+const touched = new Map(); // row key -> last local interaction (ms)
+const decimals = step => { const s = String(step), d = s.indexOf('.'); return d < 0 ? 0 : s.length - d - 1; };
+function sendSet(k, v) {
+  touched.set(k, performance.now());
+  send({ t: 'set', k: k, v: v });
+}
+function renderCfg() {
+  if (!cfgData || !$('cfg').classList.contains('on')) return;
+  const sig = JSON.stringify(cfgData.sections.map(s => [s.label,
+    s.rows.map(r => [r.k, r.type, (r.options || []).map(o => o.v + '|' + o.label).join('|')])]));
+  if (sig !== cfgSig) { cfgSig = sig; buildCfg(); }
+  updateCfg();
+}
+function buildCfg() {
+  const body = $('cfg-body');
+  body.textContent = '';
+  for (const sec of cfgData.sections) {
+    const h = document.createElement('div');
+    h.className = 'cfg-sec';
+    h.textContent = sec.label;
+    body.appendChild(h);
+    for (const r of sec.rows) body.appendChild(buildRow(r));
+  }
+}
+function buildRow(r) {
+  const row = document.createElement('div');
+  row.className = 'cfg-row';
+  row.dataset.k = r.k;
+  const lab = document.createElement('span');
+  lab.className = 'lab';
+  lab.textContent = r.label || '';
+  if (r.type === 'status') {
+    const val = document.createElement('span');
+    val.className = 'val';
+    row.append(lab, val);
+  } else if (r.type === 'toggle') {
+    const c = document.createElement('input');
+    c.type = 'checkbox';
+    c.addEventListener('change', () => { sendSet(r.k, c.checked); vibrate(8); });
+    row.append(lab, c);
+  } else if (r.type === 'slider') {
+    row.classList.add('col');
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;justify-content:space-between;gap:8px;';
+    const val = document.createElement('span');
+    val.className = 'val';
+    head.append(lab, val);
+    const s = document.createElement('input');
+    s.type = 'range';
+    s.min = r.min; s.max = r.max; s.step = r.step;
+    let lastSend = 0;
+    s.addEventListener('input', () => {
+      touched.set(r.k, performance.now());
+      val.textContent = (+s.value).toFixed(decimals(r.step));
+      const now = performance.now();
+      if (now - lastSend > 100) { lastSend = now; send({ t: 'set', k: r.k, v: +s.value }); }
+    });
+    s.addEventListener('change', () => sendSet(r.k, +s.value));
+    row.append(head, s);
+  } else if (r.type === 'combo') {
+    const sel = document.createElement('select');
+    for (const o of r.options || []) {
+      const op = document.createElement('option');
+      op.value = o.v;
+      op.textContent = o.label;
+      sel.appendChild(op);
+    }
+    sel.addEventListener('change', () => { sendSet(r.k, sel.value); vibrate(8); });
+    row.append(lab, sel);
+  } else if (r.type === 'action') {
+    const b = document.createElement('button');
+    b.style.width = '100%';
+    b.textContent = r.label || '';
+    b.addEventListener('click', () => { sendSet(r.k, true); vibrate(10); });
+    row.append(b);
+  } else { /* text | number */
+    const i = document.createElement('input');
+    i.type = r.type === 'number' ? 'number' : 'text';
+    if (r.type === 'number') { i.min = r.min; i.max = r.max; }
+    // Hold off remote updates while the field is being edited.
+    i.addEventListener('focus', () => touched.set(r.k, performance.now() + 3600000));
+    i.addEventListener('blur', () => touched.set(r.k, performance.now()));
+    i.addEventListener('change', () => send({ t: 'set', k: r.k, v: r.type === 'number' ? +i.value : i.value }));
+    row.append(lab, i);
+  }
+  return row;
+}
+function updateCfg() {
+  const body = $('cfg-body');
+  const now = performance.now();
+  for (const sec of cfgData.sections) {
+    for (const r of sec.rows) {
+      const row = body.querySelector('[data-k="' + r.k + '"]');
+      if (!row) continue;
+      row.classList.toggle('off', r.enabled === false);
+      if (r.type === 'status') {
+        row.querySelector('.val').textContent = r.v || '';
+        continue;
+      }
+      if (r.type === 'action') {
+        const b = row.querySelector('button');
+        if (b && r.label) b.textContent = r.label;
+        continue;
+      }
+      const ts = touched.get(r.k);
+      if (ts !== undefined && now - ts < 1500) continue;
+      if (r.type === 'toggle') {
+        row.querySelector('input').checked = !!r.v;
+      } else if (r.type === 'slider') {
+        const s = row.querySelector('input');
+        s.value = r.v;
+        row.querySelector('.val').textContent = (+r.v).toFixed(decimals(r.step));
+      } else if (r.type === 'combo') {
+        row.querySelector('select').value = r.v;
+      } else {
+        const i = row.querySelector('input');
+        if (document.activeElement !== i) i.value = r.v;
+      }
+    }
+  }
+}
+$('btn-cfg').addEventListener('click', () => {
+  $('cfg').classList.add('on');
+  cfgSig = ''; // force a rebuild with the latest snapshot
+  renderCfg();
+});
+$('btn-cfg-close').addEventListener('click', () => $('cfg').classList.remove('on'));
+
 /* Fullscreen (Android Chrome; iOS Safari hides the button). */
 const fsBtn = $('btn-fs');
 if (document.documentElement.requestFullscreen) {
@@ -334,7 +507,7 @@ strip.addEventListener('touchstart', stopNative, { passive: false });
    (iOS Safari, Brave, or an OS touch-feedback setting). */
 $('rev').addEventListener('click', () => {
   const ok = navigator.vibrate ? navigator.vibrate(200) : false;
-  $('rev').textContent = (navigator.vibrate ? (ok ? 'vib✓' : 'vib✗') : 'no API') + ' r5';
+  $('rev').textContent = (navigator.vibrate ? (ok ? 'vib✓' : 'vib✗') : 'no API') + ' r7';
 });
 </script>
 </body>

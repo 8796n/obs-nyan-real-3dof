@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "device_manager.h"
+#include "remote_schema.h"
 #include "ws_server.h"
 
 namespace {
@@ -46,6 +47,13 @@ struct remote_state {
 	// Distance last pushed to clients; the dock slider moves it too, so
 	// the poll re-broadcasts whenever it drifts.
 	std::atomic<float> sent_distance{-1.0f};
+
+	// Last settings-mirror snapshot pushed to clients. Built by the sync
+	// poll (UI thread - the schema reads display info and enumerates
+	// audio endpoints like the dock does) and re-sent whenever the
+	// serialized form changes, so dock-side edits show up on the phone.
+	std::mutex cfg_mutex;
+	std::string cfg_cache;
 
 	// Sub-pixel/sub-notch accumulators. One set is enough: a second
 	// simultaneous controller fighting over one cursor is not a real use
@@ -241,11 +249,8 @@ std::string state_json()
 	return json;
 }
 
-void broadcast_state()
+void broadcast_text(const std::string &json)
 {
-	const std::string json = state_json();
-	g_remote.sent_distance.store(effective_distance(),
-				     std::memory_order_relaxed);
 	std::vector<uint64_t> conns;
 	{
 		std::lock_guard<std::mutex> lk(g_remote.conns_mutex);
@@ -254,6 +259,24 @@ void broadcast_state()
 	}
 	for (uint64_t conn : conns)
 		g_remote.server.send_text(conn, json);
+}
+
+void broadcast_state()
+{
+	g_remote.sent_distance.store(effective_distance(),
+				     std::memory_order_relaxed);
+	broadcast_text(state_json());
+}
+
+std::string build_cfg_json()
+{
+	obs_data_t *cfg = obs_data_create();
+	obs_data_set_string(cfg, "t", "cfg");
+	remote_schema_build_cfg(cfg);
+	const char *json = obs_data_get_json(cfg);
+	std::string out = json ? json : "";
+	obs_data_release(cfg);
+	return out;
 }
 
 // Pointer moves ride MOUSEEVENTF_ABSOLUTE (current position + delta) instead
@@ -382,6 +405,11 @@ void handle_message(uint64_t conn, obs_data_t *msg)
 		manager_recenter(&g_device);
 	} else if (strcmp(type, "recal") == 0) {
 		manager_recalibrate(&g_device);
+	} else if (strcmp(type, "set") == 0) {
+		// Settings mirror: routed through the remote_schema table
+		// (whitelist + clamp). The confirmed state comes back via the
+		// poll's cfg push; the page renders optimistically meanwhile.
+		remote_schema_apply(msg);
 	}
 }
 
@@ -412,6 +440,14 @@ void start_server(uint16_t port, const std::string &token)
 		for (uint64_t old : evict)
 			g_remote.server.close_conn(old);
 		g_remote.server.send_text(conn, state_json());
+		// Possibly one poll stale; the sync push corrects it.
+		std::string cfg;
+		{
+			std::lock_guard<std::mutex> lk(g_remote.cfg_mutex);
+			cfg = g_remote.cfg_cache;
+		}
+		if (!cfg.empty())
+			g_remote.server.send_text(conn, cfg);
 		blog(LOG_INFO,
 		     "[obs-nyan-real-3dof] remote: client connected%s",
 		     evict.empty() ? "" : " (replacing the previous session)");
@@ -498,6 +534,21 @@ void remote_control_sync()
 		      g_remote.sent_distance.load(std::memory_order_relaxed)) >
 	    1e-4f)
 		broadcast_state();
+
+	// Settings mirror: rebuild the snapshot while someone is connected
+	// and push it when anything (dock edits, device state) changed.
+	if (remote_control_client_count() > 0) {
+		const std::string cfg = build_cfg_json();
+		bool changed;
+		{
+			std::lock_guard<std::mutex> lk(g_remote.cfg_mutex);
+			changed = cfg != g_remote.cfg_cache;
+			if (changed)
+				g_remote.cfg_cache = cfg;
+		}
+		if (changed)
+			broadcast_text(cfg);
+	}
 }
 
 void remote_control_rotate_token()
