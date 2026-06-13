@@ -111,7 +111,7 @@
        phone verify it got the new page without devtools. Tapping it fires a
        long test vibration - a bare navigator.vibrate() check, independent of
        any gesture logic. -->
-  <div id="status"><span id="dot"></span><span id="status-text">…</span><span id="rev" style="margin-left:auto;color:#3c3c44;font-size:10px;">r8</span></div>
+  <div id="status"><span id="dot"></span><span id="status-text">…</span><span id="rev" style="margin-left:auto;color:#3c3c44;font-size:10px;">r11</span></div>
   <div id="cfg">
     <div id="cfg-head"><span id="cfg-title"></span><button id="btn-cfg-close" style="flex:0 0 80px"></button></div>
     <div id="cfg-body"></div>
@@ -127,6 +127,10 @@ const DICTS = {
     hint: '1本指: 移動 ・ タップ: 左クリック<br>長押し: ドラッグ (指を離しても一瞬なら継続)<br>2本指: スクロール ・ 2本指タップ: 右クリック',
     distLabel: '距離', conn: '接続中', disc: '再接続中…',
     cfgTitle: '設定', close: '閉じる',
+    localSec: 'リモコン操作 (この端末に保存)',
+    sens: 'カーソル速度', wheelSpd: 'スクロール速度', dollySpd: '距離ホイール速度',
+    holdMs: '長押し時間 (ms)', vibStr: '振動の強さ (0=オフ)',
+    localReset: '操作設定を既定値に戻す',
     noToken: 'アクセストークンがありません。<br>OBS の nyan Real 3DoF ドックに表示される QR コードからこのページを開いてください。',
   },
   en: {
@@ -135,6 +139,10 @@ const DICTS = {
     hint: '1 finger: move / tap: left click<br>hold: drag (brief lifts keep it going)<br>2 fingers: scroll / 2-finger tap: right click',
     distLabel: 'Distance', conn: 'Connected', disc: 'Reconnecting…',
     cfgTitle: 'Settings', close: 'Close',
+    localSec: 'Remote input (saved on this device)',
+    sens: 'Cursor speed', wheelSpd: 'Scroll speed', dollySpd: 'Distance wheel speed',
+    holdMs: 'Hold time (ms)', vibStr: 'Vibration strength (0 = off)',
+    localReset: 'Reset input settings',
     noToken: 'Missing access token.<br>Open this page from the QR code shown in the nyan Real 3DoF dock in OBS.',
   },
 };
@@ -156,6 +164,8 @@ function applyLang(code) {
   L = DICTS[code];
   applyLabels();
   setStatus(wsOpen);
+  cfgSig = ''; // rebuild the settings panel (local row labels) next render
+  renderCfg();
 }
 applyLabels();
 
@@ -166,7 +176,25 @@ if (!token) {
   o.style.display = 'flex';
 }
 
-const vibrate = ms => { if (navigator.vibrate) navigator.vibrate(ms); };
+/* All haptic pulses scale with TUNE.vib (0 disables them); the rev marker's
+   self-test stays raw on purpose - it diagnoses the API itself. */
+const vibrate = ms => {
+  const t = Math.round(ms * TUNE.vib);
+  if (t > 0 && navigator.vibrate) navigator.vibrate(t);
+};
+
+/* Input coefficients, persisted per device (localStorage): screen DPI and
+   finger feel differ between phones, so these are page-local settings and
+   intentionally NOT part of the dock mirror (no server round-trip). */
+const TUNE_DEF = { sens: 1.7, wheel: 1.0, dolly: 1.0, hold: 350, vib: 1.0 };
+const TUNE = { ...TUNE_DEF };
+try {
+  const saved = JSON.parse(localStorage.getItem('nyanRemoteTune') || '{}');
+  for (const k in TUNE_DEF) if (typeof saved[k] === 'number') TUNE[k] = saved[k];
+} catch (e) {}
+function saveTune() {
+  try { localStorage.setItem('nyanRemoteTune', JSON.stringify(TUNE)); } catch (e) {}
+}
 
 let ws = null, wsOpen = false, reconnectTimer = 0;
 function setStatus(on) {
@@ -232,9 +260,9 @@ function flushSoon() {
    button held; a brief lift and re-touch continues the drag, so long drags
    can be done in strokes), 2-finger vertical = wheel, 2-finger tap = right
    click. */
-const SENS = 1.7;          // touchpad px -> cursor px
-const WHEEL_PX = 60;       // 2-finger px per wheel notch
-const HOLD_MS = 350;       // stationary press before a drag starts
+const SENS = 1.0;          // touchpad px -> cursor px, base (x TUNE.sens)
+const WHEEL_PX = 60;       // 2-finger px per wheel notch (/ TUNE.wheel)
+// Stationary press before a drag starts: TUNE.hold (ms, per-device setting).
 const HOLD_TRAVEL = 12;    // px of movement that cancels the hold
 const DRAG_LOCK_MS = 250;  // lift shorter than this keeps the drag held
 const pad = $('pad');
@@ -258,7 +286,7 @@ pad.addEventListener('pointerdown', e => {
           pad.classList.add('drag');
           vibrate(30);
         }
-      }, HOLD_MS);
+      }, TUNE.hold);
     }
   } else {
     // A second finger means a 2-finger gesture, not a hold.
@@ -273,11 +301,11 @@ pad.addEventListener('pointermove', e => {
   f.x = e.clientX; f.y = e.clientY;
   travel += Math.abs(dx) + Math.abs(dy);
   if (fingers.size === 1 && maxFingers === 1) {
-    pendDx += dx * SENS;
-    pendDy += dy * SENS;
+    pendDx += dx * SENS * TUNE.sens;
+    pendDy += dy * SENS * TUNE.sens;
   } else if (fingers.size === 2 && !dragging) {
     // Both fingers report moves; halving keeps the sum at finger speed.
-    pendWheel += -(dy * 0.5) / WHEEL_PX;
+    pendWheel += -(dy * 0.5) * TUNE.wheel / WHEEL_PX;
   }
   flushSoon();
 });
@@ -327,7 +355,7 @@ strip.addEventListener('pointermove', e => {
   if (!stripPts.has(e.pointerId)) return;
   const dy = e.clientY - stripPts.get(e.pointerId);
   stripPts.set(e.pointerId, e.clientY);
-  const steps = -dy / DIST_PX;
+  const steps = -dy / DIST_PX * TUNE.dolly;
   pendDist += steps;
   detentAcc += steps;
   const clicks = Math.floor(Math.abs(detentAcc) / DETENT_STEPS);
@@ -364,22 +392,90 @@ function sendSet(k, v) {
   send({ t: 'set', k: k, v: v });
 }
 function renderCfg() {
-  if (!cfgData || !$('cfg').classList.contains('on')) return;
-  const sig = JSON.stringify(cfgData.sections.map(s => [s.label,
+  if (!$('cfg').classList.contains('on')) return;
+  const sig = !cfgData ? 'local-only' : JSON.stringify(cfgData.sections.map(s => [s.label,
     s.rows.map(r => [r.k, r.type, (r.options || []).map(o => o.v + '|' + o.label).join('|')])]));
   if (sig !== cfgSig) { cfgSig = sig; buildCfg(); }
-  updateCfg();
+  if (cfgData) updateCfg();
 }
 function buildCfg() {
   const body = $('cfg-body');
   body.textContent = '';
-  for (const sec of cfgData.sections) {
+  for (const sec of (cfgData ? cfgData.sections : [])) {
     const h = document.createElement('div');
     h.className = 'cfg-sec';
     h.textContent = sec.label;
     body.appendChild(h);
     for (const r of sec.rows) body.appendChild(buildRow(r));
   }
+  buildLocalRows(body);
+}
+/* Page-local input coefficients: same look as mirrored rows, but they write
+   TUNE/localStorage instead of the WebSocket (dock intentionally not shown). */
+const LOCAL_ROWS = [
+  { k: 'sens',  min: 0.5, max: 4.0, step: 0.1, label: () => L.sens },
+  { k: 'wheel', min: 0.3, max: 3.0, step: 0.1, label: () => L.wheelSpd },
+  { k: 'dolly', min: 0.3, max: 3.0, step: 0.1, label: () => L.dollySpd },
+  { k: 'hold',  min: 200, max: 800, step: 50,  label: () => L.holdMs },
+  { k: 'vib',   min: 0.0, max: 3.0, step: 0.1, label: () => L.vibStr, feedback: true },
+];
+// Reference pulse the vibration-strength slider previews with: vibrate()
+// multiplies it by the value just set, so dragging the slider buzzes at the
+// strength being chosen (0 = no buzz). Rate-limited so each tap plays fully
+// rather than restarting the motor on every input event.
+const VIB_PREVIEW_BASE = 30;
+let lastVibPreviewMs = 0;
+function buildLocalRows(body) {
+  const h = document.createElement('div');
+  h.className = 'cfg-sec';
+  h.textContent = L.localSec;
+  body.appendChild(h);
+  for (const spec of LOCAL_ROWS) {
+    const row = document.createElement('div');
+    row.className = 'cfg-row col';
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;justify-content:space-between;gap:8px;';
+    const lab = document.createElement('span');
+    lab.className = 'lab';
+    lab.textContent = spec.label();
+    const val = document.createElement('span');
+    val.className = 'val';
+    val.textContent = TUNE[spec.k].toFixed(decimals(spec.step));
+    head.append(lab, val);
+    const s = document.createElement('input');
+    s.type = 'range';
+    s.min = spec.min; s.max = spec.max; s.step = spec.step;
+    s.value = TUNE[spec.k];
+    s.addEventListener('input', () => {
+      TUNE[spec.k] = +s.value;
+      val.textContent = (+s.value).toFixed(decimals(spec.step));
+      saveTune();
+      if (spec.feedback) {
+        // Preview the new strength (vibrate() scales by the value just set).
+        const now = performance.now();
+        if (now - lastVibPreviewMs >= 120) {
+          lastVibPreviewMs = now;
+          vibrate(VIB_PREVIEW_BASE);
+        }
+      }
+    });
+    row.append(head, s);
+    body.appendChild(row);
+  }
+  const resetRow = document.createElement('div');
+  resetRow.className = 'cfg-row';
+  const reset = document.createElement('button');
+  reset.style.width = '100%';
+  reset.textContent = L.localReset;
+  reset.addEventListener('click', () => {
+    Object.assign(TUNE, TUNE_DEF);
+    saveTune();
+    cfgSig = ''; // rebuild so the sliders snap back to the defaults
+    renderCfg();
+    vibrate(15);
+  });
+  resetRow.append(reset);
+  body.appendChild(resetRow);
 }
 function buildRow(r) {
   const row = document.createElement('div');
@@ -523,7 +619,7 @@ strip.addEventListener('touchstart', stopNative, { passive: false });
    (iOS Safari, Brave, or an OS touch-feedback setting). */
 $('rev').addEventListener('click', () => {
   const ok = navigator.vibrate ? navigator.vibrate(200) : false;
-  $('rev').textContent = (navigator.vibrate ? (ok ? 'vib✓' : 'vib✗') : 'no API') + ' r8';
+  $('rev').textContent = (navigator.vibrate ? (ok ? 'vib✓' : 'vib✗') : 'no API') + ' r11';
 });
 </script>
 </body>
