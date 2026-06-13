@@ -243,9 +243,14 @@ float effective_distance()
 
 std::string state_json()
 {
-	char json[64];
-	snprintf(json, sizeof(json), "{\"t\":\"state\",\"dist\":%.3f}",
-		 effective_distance());
+	// lang: the page chrome follows OBS's language once connected, so the
+	// touchpad UI and the settings mirror (server-localized labels) agree.
+	const char *locale = obs_get_locale();
+	const bool ja = locale && strncmp(locale, "ja", 2) == 0;
+	char json[80];
+	snprintf(json, sizeof(json),
+		 "{\"t\":\"state\",\"dist\":%.3f,\"lang\":\"%s\"}",
+		 effective_distance(), ja ? "ja" : "en");
 	return json;
 }
 
