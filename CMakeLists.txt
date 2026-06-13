@@ -31,6 +31,7 @@ target_sources(obs-nyan-real-3dof PRIVATE
   src/audio-wall-source.cpp
   src/ws_server.cpp
   src/remote_control.cpp
+  src/remote_schema.cpp
   src/qrcodegen/qrcodegen.cpp
   src/spatial_audio_filter.cpp
   src/transports/xreal_tcp.cpp

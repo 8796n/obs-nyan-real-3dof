@@ -300,7 +300,10 @@ right click), `Center` / `Recalibrate` at the top, and a `distance` wheel
 strip on the right edge: swipe down to walk **toward the point you are
 looking at**, swipe up to back away (the viewpoint moves along your gaze, so
 you can step up to a side display of a wide wall; the screen itself stays
-put). `Center` also resets your standing position.
+put). `Center` also resets your standing position. The ⚙ button opens a
+settings screen mirroring the dock (status, device controls, SBS output,
+audio output, screen distance/size/curve and more); changes apply to the
+dock instantly and dock-side changes follow back to the phone.
 
 Commands are gated by the random token in the URL, so devices that did not
 scan the QR code are rejected. The token and port (default 8797) persist in

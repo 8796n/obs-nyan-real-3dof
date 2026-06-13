@@ -104,6 +104,13 @@ struct device_manager {
 	// persisted, default off). The token below gates the command channel.
 	std::atomic<bool> remote_enabled{false};
 	std::atomic<int> remote_port{DEFAULT_REMOTE_PORT};
+	// Requests from the remote's settings mirror for actions that need the
+	// dock's Qt context; the dock poll consumes them (same pattern as
+	// brightness_request). projector = open the glasses fullscreen
+	// projector; monitor_rearm = re-apply the monitoring-output choice
+	// (the dock's per-connection latches live in the dock).
+	std::atomic<bool> projector_request{false};
+	std::atomic<bool> monitor_rearm{false};
 	std::atomic<bool> fov_auto{true};
 	std::atomic<int> virtual_source_count{0};
 	std::atomic<float> prediction_ms{10.0f};
