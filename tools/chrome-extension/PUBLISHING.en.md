@@ -53,10 +53,10 @@ From the repository root:
    usage + privacy policy URL (sections 5-6)
 5. Choose visibility (public / unlisted) and **submit for review**
 
-> The listing name/description currently assume OBS integration. The extension
-> also works with the standalone app (spatial-wall), so if you want a neutral
-> wording, edit `ext_desc` in `_locales/*/messages.json` before re-zipping (the
-> extension name is a brand kept identical across locales).
+> The listing name/description use neutral wording that fits both the OBS plugin
+> and the standalone Spatial Wall app (`_locales/*/messages.json`). If you change
+> the text, rebuild the zip before uploading (the extension name is a brand kept
+> identical across locales).
 
 ## 4. Microsoft Edge Add-ons (optional)
 

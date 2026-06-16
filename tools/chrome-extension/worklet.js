@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 8796n <info@8796.jp>
 // PCM tap on the audio rendering thread: never misses a quantum no matter
 // how busy the page's main thread is. Batches 512 frames (~10.7 ms) of
 // interleaved s16 and posts the buffer (transferred, not copied) to the
-// content script. Small batches keep the latency down and feed OBS's
+// content script. Small batches keep the latency down and feed nyan Real's
 // unbuffered playback at a finer granularity than its 21 ms audio tick.
 "use strict";
 
