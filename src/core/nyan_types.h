@@ -118,6 +118,14 @@ struct model_profile {
 	// plane). True for the BT-40; the SDK appendix lists the BT-35E/30E
 	// and BT-30C as unsupported.
 	bool display_distance = false;
+	// Manual brightness serial command (getbright/setbright). Both MOVERIO
+	// BT-40 and BT-30C support it. The transport (sensor_api) is only a coarse
+	// "MOVERIO" hint; support is per-model, so the dock/remote gate the
+	// brightness slider on this profile flag.
+	bool display_brightness = false;
+	// Auto-brightness serial command (getautobright/enableautobright). BT-40
+	// only; the BT-30C has manual brightness but no auto mode.
+	bool display_autobright = false;
 	float optics_focus() const
 	{
 		return optics_focus_m > 0.0f ? optics_focus_m

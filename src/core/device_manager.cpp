@@ -2,12 +2,15 @@
 // Copyright (C) 2026 8796n <info@8796.jp>
 #include "device_manager.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <thread>
+#include <vector>
 
 #include "device_registry.h"
 #include "hid_io.h"
+#include "monitor_enum.h" // enumerate/filter_monitors for focus cycling
 #include "nyan_log.h"
 #include "nyan_time.h"
 #include "transports.h"
@@ -36,10 +39,19 @@ bool sbs_output_active(uint32_t output_w, uint32_t output_h)
 		return true;
 	if (mode == 2)
 		return false;
+	// Auto: a MOVERIO explicitly switched to 3D is Half-SBS at a normal
+	// 1920x1080 aspect, which the double-wide size test below can't detect -
+	// so honour the chosen display mode (display_mode_current == 1 = 3D).
+	if (detected_transport_for(&g_device) == imu_transport::sensor_api &&
+	    g_device.display_mode_current.load(std::memory_order_relaxed) == 1)
+		return true;
+	// Otherwise: a Full-SBS double-wide output (glasses in an SBS mode).
 	const uint32_t glasses_w =
 		g_glasses_display_width.load(std::memory_order_relaxed);
 	return glasses_w != 0 && output_h != 0 && output_w >= output_h * 3;
 }
+
+static void maybe_auto_recenter_locked(device_manager *f);
 
 void publish_pose(device_manager *f, bool connected)
 {
@@ -84,6 +96,7 @@ bool publish_sensor_samples(device_manager *f, const imu_sample *imu,
 	if (imu)
 		f->tracker.on_imu(*imu);
 	f->pose = f->tracker.snapshot();
+	maybe_auto_recenter_locked(f);
 	f->pose.connected = true;
 	return true;
 }
@@ -107,6 +120,7 @@ bool publish_external_pose(device_manager *f, const quatd &device_q,
 	f->tracker.set_debug(f->debug_log.load(std::memory_order_relaxed));
 	f->tracker.on_external_pose(device_q, ts_us);
 	f->pose = f->tracker.snapshot();
+	maybe_auto_recenter_locked(f);
 	f->pose.connected = true;
 	return true;
 }
@@ -120,9 +134,26 @@ static void clear_viewer_offset(device_manager *f)
 	f->viewer_offset_z.store(0.0f, std::memory_order_relaxed);
 }
 
+// Square the view up once on the first calibrated pose after (re)connect, so the
+// glasses point "forward" without the user pressing recenter. Decided scope
+// (2026-06): connect's first calibration only - a manual gyro recalibration does
+// NOT auto-center (auto_recentered stays set), so a desk recalibration won't
+// fling the view. Must be called with state_mutex held, right after the pose
+// snapshot; it re-snapshots when it recenters.
+static void maybe_auto_recenter_locked(device_manager *f)
+{
+	if (f->auto_recentered || !f->pose.calibrated)
+		return;
+	f->auto_recentered = true;
+	clear_viewer_offset(f);
+	f->tracker.recenter();
+	f->pose = f->tracker.snapshot();
+}
+
 static void reset_tracker_for_model_locked(device_manager *f, model_id m)
 {
 	clear_viewer_offset(f);
+	f->auto_recentered = false; // re-arm auto-recenter for the new connection
 	f->tracker.reset();
 	if (m != MODEL_UNKNOWN)
 		f->tracker.set_mount_deg(profile_for(m).mount_x_deg);
@@ -176,7 +207,17 @@ static void run_detection_scan(device_manager *f)
 void detect_worker_fn(device_manager *f)
 {
 	while (!f->stop.load(std::memory_order_relaxed)) {
-		run_detection_scan(f);
+		// Master off (connect_enabled): stop scanning and drop the detected
+		// model so the worker disconnects and the glasses' HID is released
+		// for other apps.
+		if (f->connect_enabled.load(std::memory_order_relaxed)) {
+			run_detection_scan(f);
+		} else if (f->detected_model.exchange(MODEL_UNKNOWN,
+						      std::memory_order_relaxed) !=
+			   MODEL_UNKNOWN) {
+			std::lock_guard<std::mutex> lk(f->state_mutex);
+			reset_tracker_for_model_locked(f, MODEL_UNKNOWN);
+		}
 		for (int i = 0; i < 20 && !f->stop.load(std::memory_order_relaxed);
 		     ++i)
 			std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -282,10 +323,14 @@ void worker_fn(device_manager *f)
 void manager_recenter(device_manager *f)
 {
 	clear_viewer_offset(f);
-	std::lock_guard<std::mutex> lk(f->state_mutex);
-	f->tracker.recenter();
-	f->pose = f->tracker.snapshot();
-	f->pose.connected = f->connected.load(std::memory_order_relaxed);
+	{
+		std::lock_guard<std::mutex> lk(f->state_mutex);
+		f->tracker.recenter();
+		f->pose = f->tracker.snapshot();
+		f->pose.connected = f->connected.load(std::memory_order_relaxed);
+	}
+	// Let backends react (the standalone snaps the cursor to the view center).
+	f->recenter_gen.fetch_add(1, std::memory_order_relaxed);
 }
 
 void manager_recalibrate(device_manager *f)
@@ -407,6 +452,36 @@ void manager_set_mag_yaw(device_manager *f, bool enabled)
 	f->pose.connected = f->connected.load(std::memory_order_relaxed);
 }
 
+void manager_set_focus_display(device_manager *f, int windows_number)
+{
+	const int n = windows_number > 0 ? windows_number : 0;
+	if (f->focus_display.exchange(n, std::memory_order_relaxed) != n)
+		f->wall_rebuild_gen.fetch_add(1, std::memory_order_relaxed);
+}
+
+void manager_focus_cycle(device_manager *f, int dir)
+{
+	// Option ring: 0 (whole wall) + each non-glasses display's Windows number.
+	std::vector<int> opts;
+	opts.push_back(0);
+	for (const monitor_entry &m : filter_monitors(enumerate_monitors(),
+						      /*include_primary=*/true,
+						      /*exclude_glasses=*/true, "",
+						      ""))
+		opts.push_back(m.windows_number);
+	std::sort(opts.begin() + 1, opts.end());
+	const int cur = f->focus_display.load(std::memory_order_relaxed);
+	int idx = 0;
+	for (size_t i = 0; i < opts.size(); ++i)
+		if (opts[i] == cur) {
+			idx = static_cast<int>(i);
+			break;
+		}
+	const int n = static_cast<int>(opts.size());
+	idx = ((idx + dir) % n + n) % n;
+	manager_set_focus_display(f, opts[idx]);
+}
+
 void manager_set_connect_enabled(device_manager *f, bool enabled)
 {
 	const bool prev = f->connect_enabled.exchange(enabled, std::memory_order_relaxed);
@@ -452,6 +527,9 @@ void manager_reset_defaults(device_manager *f)
 	f->screen_curve.store(DEFAULT_SCREEN_CURVE, std::memory_order_relaxed);
 	f->ipd_mm.store(DEFAULT_IPD_MM, std::memory_order_relaxed);
 	f->convergence_link.store(false, std::memory_order_relaxed);
+	f->offscreen_indicator.store(true, std::memory_order_relaxed);
+	f->pose_follow.store(true, std::memory_order_relaxed);
+	manager_set_focus_display(f, 0);
 	f->mag_yaw.store(false, std::memory_order_relaxed);
 	f->auto_projector.store(false, std::memory_order_relaxed);
 	f->monitor_out.store(MONITOR_OUT_AUTO_GLASSES, std::memory_order_relaxed);

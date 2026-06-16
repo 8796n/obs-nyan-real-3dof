@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 8796n <info@8796.jp>
 // Shared head-tracked pan law for the spatial audio filter and the audio
-// wall source: constant-power panning of a source anchored at a fixed
-// bearing in the recentered virtual space, with a behind-the-head level cue
-// and optional screen-distance attenuation. Header-only.
+// wall (OBS source / standalone): constant-power panning of a source anchored
+// at a fixed bearing in the recentered virtual space, with a behind-the-head
+// level cue and optional screen-distance attenuation. OBS-independent (reads
+// g_device + math_util only), so both backends share one pan law. Header-only.
 #pragma once
 
 #include <cmath>
@@ -27,6 +28,12 @@ struct spatial_gains {
 // stay at their configured bearings instead of jumping around.
 inline double spatial_current_head_yaw()
 {
+	// pose_follow off = head-locked: the screen shows a view-locked mirror, so
+	// the audio must stay locked to its screen bearings too (no head tracking),
+	// matching the warp. Otherwise sources would drift with the head while the
+	// picture does not.
+	if (!g_device.pose_follow.load(std::memory_order_relaxed))
+		return 0.0;
 	std::lock_guard<std::mutex> lk(g_device.state_mutex);
 	if (g_device.pose.calibrated && g_device.pose.connected)
 		return yaw_from_quat_heading(g_device.pose.q);

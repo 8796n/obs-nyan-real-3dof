@@ -7,6 +7,18 @@
 
 #include <string>
 
+// Host capability flags: let shared core/dock/remote hide or relabel controls
+// that only make sense on one host. Defaults are the OBS set (all present); the
+// standalone installs a reduced set at startup. The remote settings mirror (and,
+// later, the dock) consult these so behaviour follows the connected host.
+struct nyan_host_caps {
+	bool obs_monitoring_keep = true; // audio "leave OBS monitoring as-is" option
+	bool projector = true;           // open / auto-open the glasses projector
+	bool virtual_sources = true;     // the "virtual sources" count status
+};
+const nyan_host_caps &nyan_caps();
+void nyan_set_caps(const nyan_host_caps &caps);
+
 // Localized text for a key (the dock's locale keys). Returns the key itself if
 // no provider is installed, so labels degrade visibly rather than vanish.
 const char *nyan_text(const char *key);

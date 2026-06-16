@@ -65,6 +65,12 @@ std::vector<monitor_entry> filter_monitors(const std::vector<monitor_entry> &all
 					   const std::string &filter,
 					   const std::string &exclude_filter);
 
+// Focus mode: keep only the monitor whose Windows number matches (focus mode).
+// number <= 0, or no match (the display is gone), returns the input unchanged so
+// the wall never goes empty.
+std::vector<monitor_entry> focus_monitor(const std::vector<monitor_entry> &monitors,
+					 int windows_number);
+
 // Groups monitors into rows from a free-form layout string ("1,2/3"); a zero in
 // any token switches the whole layout to zero-based numbering.
 std::vector<std::vector<monitor_entry>>

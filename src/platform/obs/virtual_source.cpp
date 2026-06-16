@@ -14,11 +14,15 @@
 #include <cstring>
 #include <string>
 
+#include "audio-wall-source.h" // nyan_real_audio_wall_active (j warning)
 #include "device_manager.h"
 #include "device_registry.h"
 #include "display-wall-source.h"
+#include "endpoint_volume.h" // default_render_endpoint_id (j warning)
 #include "math_util.h"
 #include "nyan_types.h"
+#include "overlay_text.h" // in-glasses status overlay rasterizer (shared)
+#include "warp_params.h"
 
 // GPU stage probes (debug logging only): D3D11 timestamp queries around the
 // capture and warp draws. gs_timer_get_data busy-waits until the GPU passes
@@ -94,6 +98,20 @@ struct nyan_real_virtual_source {
 	gs_eparam_t *p_screen_curve = nullptr;
 	gs_eparam_t *p_eye_pos_m = nullptr;
 	gs_eparam_t *p_debug_tint = nullptr;
+	gs_eparam_t *p_offscreen_dir = nullptr;
+	gs_eparam_t *p_offscreen_intensity = nullptr;
+	gs_eparam_t *p_offscreen_band = nullptr;
+	gs_eparam_t *p_flat_fit = nullptr;
+	// In-glasses status overlay (calibrating, etc.): texture cached from the
+	// shared Qt rasterizer, rebuilt only when the message changes.
+	gs_texture_t *overlay_tex = nullptr;
+	uint32_t overlay_w = 0;
+	uint32_t overlay_h = 0;
+	std::string overlay_msg;
+	// Throttled cache for the (j) "output == Windows default" warning: the
+	// default-device query is too heavy to run every view.
+	uint64_t last_audio_check_ns = 0;
+	bool audio_conflict = false;
 	std::string target_name;
 	uint32_t output_width = 1920;
 	uint32_t output_height = 1080;
@@ -118,23 +136,6 @@ struct nyan_real_virtual_source {
 	uint32_t acc_views = 0;
 	uint64_t last_gpu_log_ns = 0;
 };
-
-static quatd predict_pose(const pose_snapshot &p, float prediction_ms)
-{
-	quatd q = p.q;
-	const double dt = clampd(prediction_ms, 0.0, 50.0) / 1000.0;
-	const double wn =
-		std::sqrt(p.omega.x * p.omega.x + p.omega.y * p.omega.y + p.omega.z * p.omega.z);
-	if (p.calibrated && std::isfinite(wn) && wn > 1e-6 && dt > 0.0) {
-		const double angle = wn * dt;
-		const double h = 0.5 * angle;
-		const double s = std::sin(h) / wn;
-		const quatd dq = {std::cos(h), p.omega.x * s, p.omega.y * s,
-				  p.omega.z * s};
-		q = quat_normalize(quat_multiply(q, dq));
-	}
-	return q;
-}
 
 static const char *virtual_source_get_name(void *)
 {
@@ -176,135 +177,66 @@ static gs_effect_t *create_warp_effect(gs_eparam_t **p_image,
 				       gs_eparam_t **p_eye_pos_m,
 				       gs_eparam_t **p_debug_tint)
 {
+	// The libobs effect parser has no #include, so build the effect string by
+	// prepending the shared warp math (data/nyan_warp.hlsli, also used by the
+	// standalone) to the effect wrapper. Single GPU source of truth.
+	char *hlsli_path = obs_module_file("nyan_warp.hlsli");
 	char *effect_path = obs_module_file("nyan-real-3dof.effect");
-	gs_effect_t *effect = gs_effect_create_from_file(effect_path, nullptr);
+	char *hlsli = hlsli_path ? os_quick_read_utf8_file(hlsli_path) : nullptr;
+	char *wrapper = effect_path ? os_quick_read_utf8_file(effect_path) : nullptr;
+	gs_effect_t *effect = nullptr;
+	if (hlsli && wrapper) {
+		const std::string combined = std::string(hlsli) + "\n" + wrapper;
+		effect = gs_effect_create(combined.c_str(), "nyan-real-3dof.effect",
+					  nullptr);
+	}
+	bfree(hlsli_path);
 	bfree(effect_path);
+	bfree(hlsli);
+	bfree(wrapper);
 	bind_warp_effect(effect, p_image, p_pose_q, p_pose_valid, p_tan_half_fov,
 			 p_screen_distance_m, p_screen_half_size_m, p_screen_curve,
 			 p_eye_pos_m, p_debug_tint);
 	return effect;
 }
 
-// Returns the predicted pose quaternion handed to the shader so the caller
-// can derive the per-eye world-space offsets from the same pose.
-static quatd set_warp_effect_parameters(gs_eparam_t *p_pose_q,
-					gs_eparam_t *p_pose_valid,
-					gs_eparam_t *p_tan_half_fov,
-					gs_eparam_t *p_screen_distance_m,
-					gs_eparam_t *p_screen_half_size_m,
-					gs_eparam_t *p_screen_curve,
-					gs_eparam_t *p_debug_tint,
-					uint32_t view_w, uint32_t view_h,
-					uint32_t screen_w, uint32_t screen_h,
-					bool enable_pose)
+// Pushes the core-computed warp_params into the effect's uniforms. The math
+// itself lives in core (compute_warp_params) so the OBS source and the
+// standalone renderer cannot drift.
+static void set_warp_effect_parameters(const nyan_real_virtual_source *s,
+				       const warp_params &wp)
 {
-	pose_snapshot p;
-	{
-		std::lock_guard<std::mutex> lk(g_device.state_mutex);
-		p = g_device.pose;
-	}
-	quatd q = predict_pose(
-		p, g_device.prediction_ms.load(std::memory_order_relaxed));
-	gs_effect_set_float(p_pose_valid,
-			    (enable_pose && p.calibrated && p.connected) ? 1.0f
-									 : 0.0f);
-
-	// The global FOV value is the single source of truth for rendering. When
-	// auto FOV is on, the resolved HID model writes its FOV into this value;
-	// otherwise the dock's manual value is used.
-	const float diagonal_fov_deg = static_cast<float>(
-		clampd(g_device.fov_deg.load(std::memory_order_relaxed), 20.0, 100.0));
-	const float view_aspect = view_h ? static_cast<float>(view_w) /
-						 static_cast<float>(view_h)
-					: 1.0f;
-	const float screen_aspect = screen_h ? static_cast<float>(screen_w) /
-						   static_cast<float>(screen_h)
-					      : view_aspect;
-	const float screen_height_factor =
-		(view_h > 0 && screen_h > view_h)
-			? static_cast<float>(screen_h) / static_cast<float>(view_h)
-			: 1.0f;
-	/* XREAL's public FOV is conventionally diagonal. Treat the UI value the
-	 * same way and derive the viewer's horizontal/vertical tangents from the
-	 * output aspect. The physical virtual screen keeps at least that viewer
-	 * height, expands vertically when the referenced texture is taller than the
-	 * output view, and uses the referenced texture's aspect. This lets multi-row
-	 * display walls extend vertically instead of being squeezed into one view. */
-	const float tan_diag =
-		std::tan(diagonal_fov_deg * static_cast<float>(PI) / 360.0f);
-	const float diag_scale = std::sqrt(view_aspect * view_aspect + 1.0f);
-	const float tan_x = tan_diag * view_aspect / diag_scale;
-	const float tan_y = tan_diag / diag_scale;
-	const float screen_distance_m = static_cast<float>(
-		clampd(g_device.screen_distance_m.load(std::memory_order_relaxed),
-		       MIN_SCREEN_DISTANCE_M, MAX_SCREEN_DISTANCE_M));
-	const float screen_size_factor = static_cast<float>(
-		clampd(g_device.screen_size_factor.load(std::memory_order_relaxed), 0.05,
-		       4.0));
-	const float screen_curve = static_cast<float>(
-		clampd(g_device.screen_curve.load(std::memory_order_relaxed), 0.0,
-		       MAX_SCREEN_CURVE));
-	struct vec2 tan_half_fov;
-	tan_half_fov.x = tan_x;
-	tan_half_fov.y = tan_y;
-	struct vec2 screen_half_size_m;
-	// The size factor scales against the fixed 4 m unit (factor 1.0 fills
-	// the FOV seen from 4 m), independent of the current distance - moving
-	// the distance slider keeps the physical size and changes how big the
-	// screen looks.
-	screen_half_size_m.y = SCREEN_SIZE_UNIT_DISTANCE_M * tan_y *
-			       screen_size_factor * screen_height_factor;
-	screen_half_size_m.x = screen_half_size_m.y * screen_aspect;
-	// Published for the Audio Wall's geometric bearing computation.
-	g_device.screen_half_width_m.store(screen_half_size_m.x,
-					   std::memory_order_relaxed);
-
-	// Center-display offset: rotate the world so the chosen wall
-	// monitor's center sits straight ahead after a recenter (horizontal
-	// only; vertical placement is untouched). Same flat/cylinder math as
-	// the Audio Wall's bearing solver; the resulting yaw is published so
-	// the Audio Wall can subtract it and keep bearings matching the
-	// picture.
-	double yaw_off = 0.0;
-	const float center_u = nyan_real_wall_center_u();
-	if (center_u >= 0.0f && screen_half_size_m.x > 1e-6f) {
-		const double off = (clampd(center_u, 0.0, 1.0) - 0.5) * 2.0 *
-				   screen_half_size_m.x;
-		if (screen_curve <= 0.0001f) {
-			yaw_off = std::atan2(
-				off, static_cast<double>(screen_distance_m));
-		} else {
-			const double radius = static_cast<double>(
-				screen_distance_m / screen_curve);
-			const double theta = off / radius;
-			yaw_off = std::atan2(
-				radius * std::sin(theta),
-				screen_distance_m -
-					radius * (1.0 - std::cos(theta)));
-		}
-	}
-	g_device.screen_yaw_offset_deg.store(
-		static_cast<float>(yaw_off * 180.0 / PI),
-		std::memory_order_relaxed);
-	if (yaw_off != 0.0)
-		q = quat_normalize(
-			quat_multiply(quat_from_yaw_y(-yaw_off), q));
 	struct vec4 pose_q;
-	pose_q.x = static_cast<float>(q.w);
-	pose_q.y = static_cast<float>(q.x);
-	pose_q.z = static_cast<float>(q.y);
-	pose_q.w = static_cast<float>(q.z);
-	gs_effect_set_vec4(p_pose_q, &pose_q);
-
-	gs_effect_set_vec2(p_tan_half_fov, &tan_half_fov);
-	gs_effect_set_float(p_screen_distance_m, screen_distance_m);
-	gs_effect_set_vec2(p_screen_half_size_m, &screen_half_size_m);
-	gs_effect_set_float(p_screen_curve, screen_curve);
-	gs_effect_set_float(p_debug_tint,
-			    g_device.debug_log.load(std::memory_order_relaxed)
-				    ? (p.connected ? 0.25f : 0.6f)
-				    : 0.0f);
-	return q;
+	pose_q.x = wp.pose_q[0];
+	pose_q.y = wp.pose_q[1];
+	pose_q.z = wp.pose_q[2];
+	pose_q.w = wp.pose_q[3];
+	gs_effect_set_vec4(s->p_pose_q, &pose_q);
+	gs_effect_set_float(s->p_pose_valid, wp.pose_valid);
+	struct vec2 tan_half_fov;
+	tan_half_fov.x = wp.tan_half_fov[0];
+	tan_half_fov.y = wp.tan_half_fov[1];
+	gs_effect_set_vec2(s->p_tan_half_fov, &tan_half_fov);
+	gs_effect_set_float(s->p_screen_distance_m, wp.screen_distance_m);
+	struct vec2 screen_half_size_m;
+	screen_half_size_m.x = wp.screen_half_size_m[0];
+	screen_half_size_m.y = wp.screen_half_size_m[1];
+	gs_effect_set_vec2(s->p_screen_half_size_m, &screen_half_size_m);
+	gs_effect_set_float(s->p_screen_curve, wp.screen_curve);
+	gs_effect_set_float(s->p_debug_tint, wp.debug_tint);
+	struct vec2 offscreen_dir;
+	offscreen_dir.x = wp.offscreen_dir[0];
+	offscreen_dir.y = wp.offscreen_dir[1];
+	gs_effect_set_vec2(s->p_offscreen_dir, &offscreen_dir);
+	gs_effect_set_float(s->p_offscreen_intensity, wp.offscreen_intensity);
+	struct vec2 offscreen_band;
+	offscreen_band.x = wp.offscreen_band[0];
+	offscreen_band.y = wp.offscreen_band[1];
+	gs_effect_set_vec2(s->p_offscreen_band, &offscreen_band);
+	struct vec2 flat_fit;
+	flat_fit.x = wp.flat_fit[0];
+	flat_fit.y = wp.flat_fit[1];
+	gs_effect_set_vec2(s->p_flat_fit, &flat_fit);
 }
 
 struct recursion_check_data {
@@ -428,6 +360,16 @@ static void *virtual_source_create(obs_data_t *settings, obs_source_t *context)
 				       &s->p_screen_curve,
 				       &s->p_eye_pos_m,
 				       &s->p_debug_tint);
+	if (s->effect) {
+		s->p_offscreen_dir =
+			gs_effect_get_param_by_name(s->effect, "offscreen_dir");
+		s->p_offscreen_intensity = gs_effect_get_param_by_name(
+			s->effect, "offscreen_intensity");
+		s->p_offscreen_band =
+			gs_effect_get_param_by_name(s->effect, "offscreen_band");
+		s->p_flat_fit =
+			gs_effect_get_param_by_name(s->effect, "flat_fit");
+	}
 	obs_leave_graphics();
 
 	if (!s->effect) {
@@ -465,6 +407,8 @@ static void virtual_source_destroy(void *data)
 	obs_enter_graphics();
 	if (s->texrender)
 		gs_texrender_destroy(s->texrender);
+	if (s->overlay_tex)
+		gs_texture_destroy(s->overlay_tex);
 	if (s->effect)
 		gs_effect_destroy(s->effect);
 	for (int parity = 0; parity < 2; parity++) {
@@ -603,47 +547,103 @@ static bool virtual_source_capture_target(nyan_real_virtual_source *s, uint32_t 
 	return true;
 }
 
+// Rebuild the overlay texture when the message changes (graphics context).
+static void virtual_source_set_overlay(nyan_real_virtual_source *s,
+				       const std::string &msg, int font_px)
+{
+	if (msg == s->overlay_msg)
+		return;
+	s->overlay_msg = msg;
+	if (s->overlay_tex) {
+		gs_texture_destroy(s->overlay_tex);
+		s->overlay_tex = nullptr;
+	}
+	s->overlay_w = s->overlay_h = 0;
+	if (msg.empty())
+		return;
+	const overlay_bitmap bmp = overlay_text_rasterize(msg, font_px);
+	if (bmp.width <= 0 || bmp.height <= 0)
+		return;
+	const uint8_t *data = bmp.rgba.data();
+	s->overlay_tex = gs_texture_create(static_cast<uint32_t>(bmp.width),
+					   static_cast<uint32_t>(bmp.height),
+					   GS_RGBA, 1, &data, 0);
+	if (s->overlay_tex) {
+		s->overlay_w = static_cast<uint32_t>(bmp.width);
+		s->overlay_h = static_cast<uint32_t>(bmp.height);
+	}
+}
+
+// Composite the overlay centered over the warped output (per eye for SBS), with
+// straight-alpha blending (the Qt bitmap is non-premultiplied). conv_px shifts
+// the left eye's copy right and the right eye's left so a 2D card converges at
+// the virtual screen's depth (0 = none). Uses the warp's translate + sized
+// gs_draw_sprite idiom (no scale matrix) so both eyes draw reliably.
+static void virtual_source_draw_overlay(nyan_real_virtual_source *s, bool sbs,
+					uint32_t eye_w, int conv_px)
+{
+	if (!s->overlay_tex || !s->overlay_w || !s->overlay_h)
+		return;
+	gs_effect_t *eff = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_effect_set_texture(gs_effect_get_param_by_name(eff, "image"),
+			      s->overlay_tex);
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+	const uint32_t region_w = sbs ? eye_w : s->output_width;
+	const int eye_count = sbs ? 2 : 1;
+	// Both eyes are drawn inside one effect pass (as the warp does); looping
+	// the effect per eye left the second eye undrawn.
+	while (gs_effect_loop(eff, "Draw")) {
+		for (int e = 0; e < eye_count; e++) {
+			float scale = 1.0f;
+			const float maxw = static_cast<float>(region_w) * 0.9f;
+			if (static_cast<float>(s->overlay_w) > maxw)
+				scale = maxw / static_cast<float>(s->overlay_w);
+			const uint32_t dw = static_cast<uint32_t>(
+				static_cast<float>(s->overlay_w) * scale + 0.5f);
+			const uint32_t dh = static_cast<uint32_t>(
+				static_cast<float>(s->overlay_h) * scale + 0.5f);
+			const float sign = (e == 0) ? 1.0f : -1.0f;
+			const float ox =
+				static_cast<float>(region_w) *
+					static_cast<float>(e) +
+				(static_cast<float>(region_w) -
+				 static_cast<float>(dw)) /
+					2.0f +
+				sign * static_cast<float>(conv_px);
+			const float oy = (static_cast<float>(s->output_height) -
+					  static_cast<float>(dh)) /
+					 2.0f;
+			gs_matrix_push();
+			gs_matrix_translate3f(ox, oy, 0.0f);
+			gs_draw_sprite(s->overlay_tex, 0, dw, dh);
+			gs_matrix_pop();
+		}
+	}
+	gs_blend_state_pop();
+}
+
 static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *tex,
 				     uint32_t source_w, uint32_t source_h)
 {
-	const bool sbs = sbs_output_active(s->output_width, s->output_height);
-	const uint32_t eye_w = sbs ? s->output_width / 2 : s->output_width;
+	// All warp math is shared in core (warp_params) so the OBS source and the
+	// standalone renderer cannot drift.
+	const eye_layout eyes =
+		compute_eye_layout(s->output_width, s->output_height);
+	const warp_params wp = compute_warp_params(
+		eyes, s->output_height, source_w, source_h,
+		hid_device_ready(&g_device), nyan_real_wall_center_u());
+	set_warp_effect_parameters(s, wp);
 
-	// Full SBS (double-wide frame, e.g. 3840x1080) maps each half 1:1 to
-	// the panel, so the FOV math uses the half width. Half-SBS (manual ON
-	// at a normal aspect, e.g. 1920x1080) is anamorphic: the glasses
-	// stretch each half back to the full panel width, so the optics show
-	// each eye the full output aspect and the FOV math must use the
-	// unsqueezed width - feeding it the half width renders a narrower
-	// view that the stretch then distorts horizontally.
-	const bool half_sbs = sbs && s->output_width < s->output_height * 3;
-	const uint32_t eye_fov_w = half_sbs ? s->output_width : eye_w;
-	const quatd q = set_warp_effect_parameters(
-		s->p_pose_q, s->p_pose_valid, s->p_tan_half_fov,
-		s->p_screen_distance_m, s->p_screen_half_size_m, s->p_screen_curve,
-		s->p_debug_tint, eye_fov_w, s->output_height, source_w, source_h,
-		hid_device_ready(&g_device));
+	const bool sbs = eyes.sbs;
+	const uint32_t eye_w = eyes.eye_w;
 
-	// Per-eye parallax: each eye renders from its own world position
-	// (the head-frame ±IPD/2 lateral offset rotated by the pose). The
-	// screen then converges at screen_distance_m instead of optical
-	// infinity, and gets closer/larger as that distance shrinks. Mono
-	// output keeps the single centered eye. The gaze-dolly viewer offset
-	// (remote-driven head translation) shifts both eyes alike.
-	const double half_ipd_m =
-		sbs ? clampd(g_device.ipd_mm.load(std::memory_order_relaxed),
-			     MIN_IPD_MM, MAX_IPD_MM) *
-			      0.0005
-		    : 0.0;
-	const vec3d eye_right = rotate_vector(q, {half_ipd_m, 0.0, 0.0});
-	const vec3d viewer = {
-		g_device.viewer_offset_x.load(std::memory_order_relaxed),
-		g_device.viewer_offset_y.load(std::memory_order_relaxed),
-		g_device.viewer_offset_z.load(std::memory_order_relaxed)};
+	// Per-eye ray origin = viewer + sign*eye_right (gaze-dolly viewer offset +
+	// IPD parallax; sign -1 = left/mono, +1 = right).
 	struct vec3 eye_pos;
-	vec3_set(&eye_pos, static_cast<float>(viewer.x - eye_right.x),
-		 static_cast<float>(viewer.y - eye_right.y),
-		 static_cast<float>(viewer.z - eye_right.z));
+	vec3_set(&eye_pos, static_cast<float>(wp.viewer.x - wp.eye_right.x),
+		 static_cast<float>(wp.viewer.y - wp.eye_right.y),
+		 static_cast<float>(wp.viewer.z - wp.eye_right.z));
 	gs_effect_set_vec3(s->p_eye_pos_m, &eye_pos); // left eye (or mono center)
 
 	const bool previous_srgb = gs_set_linear_srgb(true);
@@ -665,9 +665,9 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 			// device_draw via gs_effect_update_params, so the
 			// right half picks up the right-eye origin.
 			vec3_set(&eye_pos,
-				 static_cast<float>(viewer.x + eye_right.x),
-				 static_cast<float>(viewer.y + eye_right.y),
-				 static_cast<float>(viewer.z + eye_right.z));
+				 static_cast<float>(wp.viewer.x + wp.eye_right.x),
+				 static_cast<float>(wp.viewer.y + wp.eye_right.y),
+				 static_cast<float>(wp.viewer.z + wp.eye_right.z));
 			gs_effect_set_vec3(s->p_eye_pos_m, &eye_pos);
 			gs_matrix_push();
 			gs_matrix_translate3f(static_cast<float>(eye_w), 0.0f,
@@ -680,6 +680,53 @@ static void virtual_source_draw_warp(nyan_real_virtual_source *s, gs_texture_t *
 	gs_technique_end(tech);
 	gs_enable_framebuffer_srgb(previous_fb);
 	gs_set_linear_srgb(previous_srgb);
+
+	// In-glasses status overlay centered over the warp. Calibrating (transient)
+	// wins over the audio-conflict warning (Audio Wall on and its monitoring
+	// output is the Windows default = raw + spatialized double up). The
+	// default-device query is throttled to ~1 Hz.
+	bool calibrated;
+	{
+		std::lock_guard<std::mutex> lk(g_device.state_mutex);
+		calibrated = g_device.pose.calibrated;
+	}
+	const uint64_t now = os_gettime_ns();
+	if (now - s->last_audio_check_ns > 1000000000ULL) {
+		s->last_audio_check_ns = now;
+		s->audio_conflict = false;
+		if (nyan_real_audio_wall_active()) {
+			const char *mon_name = nullptr;
+			const char *mon_id = nullptr;
+			obs_get_audio_monitoring_device(&mon_name, &mon_id);
+			const std::string id = mon_id ? mon_id : "";
+			s->audio_conflict =
+				id == "default" ||
+				(!id.empty() &&
+				 id == default_render_endpoint_id());
+		}
+	}
+	std::string ov;
+	// Glasses-only: with nothing plugged in there's no in-glasses view worth
+	// annotating, and "@auto" audio falls back to the default endpoint, which
+	// would otherwise false-trigger the audio_default notice forever (it only
+	// matters once audio is actually routed to the glasses).
+	if (g_device.connected.load(std::memory_order_relaxed)) {
+		if (!calibrated)
+			ov = obs_module_text("overlay.calibrating");
+		else if (s->audio_conflict)
+			ov = obs_module_text("overlay.audio_default");
+	}
+	virtual_source_set_overlay(s, ov,
+				   static_cast<int>(s->output_height / 16));
+	// Converge the 2D card to the virtual screen's depth (per-eye disparity);
+	// mono has no disparity. Shared projection with the standalone backend.
+	const int conv_px =
+		sbs ? overlay_convergence_px(
+			      eye_w, wp.tan_half_fov[0], wp.screen_distance_m,
+			      g_device.ipd_mm.load(std::memory_order_relaxed) /
+				      1000.0)
+		    : 0;
+	virtual_source_draw_overlay(s, sbs, eye_w, conv_px);
 }
 
 // Read the probes written two frames ago and emit a once-a-second summary.

@@ -263,7 +263,9 @@ in XREAL.
 The model (XREAL One / One Pro / 1S / ROG XREAL R1 / Air / Air 2, RayNeo Air
 series, EPSON MOVERIO BT-40 / BT-30C, Rokid Max / Air, VITURE One / One Lite / Pro, Nreal Light) is auto-detected over HID; the connection and warp start only after HID
 identifies a supported device. The detected device controls the mount offset and
-display FOV; turn off `Auto FOV from device` to set the FOV manually.
+display FOV; turn off `Auto FOV from device` to set the FOV manually. See
+[docs/devices.md](docs/devices.md) for the per-model resolution, diagonal FoV,
+device-specific features, and hardware-verification status.
 
 The detection table is user-extensible: place a `devices.json` at
 `%AppData%\obs-studio\plugin_config\obs-nyan-real-3dof\devices.json` to add

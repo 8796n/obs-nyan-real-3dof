@@ -19,6 +19,10 @@ void register_nyan_real_ws_audio_source();
 // audio_wall_update right after creating.
 audio_wall_engine *audio_wall_create(obs_source_t *parent);
 void audio_wall_destroy(audio_wall_engine *engine);
+// True while at least one audio wall is enabled (spatial audio is being mixed
+// to the monitoring output). The virtual screen uses it to gate the
+// output==Windows-default warning.
+bool nyan_real_audio_wall_active();
 void audio_wall_update(audio_wall_engine *engine, obs_data_t *settings);
 void audio_wall_defaults(obs_data_t *settings);
 // Appends the checkable "audio_wall" group to the host's properties.

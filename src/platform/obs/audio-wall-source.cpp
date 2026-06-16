@@ -38,10 +38,14 @@
 #include <vector>
 
 #include "audio-wall-source.h"
+#include "audio_exclude.h"
 #include "display-wall-source.h"
 #include "nyan_json.h"
+#include "process_util.h" // pid_exe_lower (shared OBS-free Win32)
 #include "spatial_pan.h"
 #include "tooltip_util.h"
+#include "warp_params.h"
+#include "ws_audio.h"
 #include "ws_server.h"
 
 namespace {
@@ -56,7 +60,7 @@ constexpr uint64_t WS_STREAM_TIMEOUT_NS = 5000000000ULL;
 // so mismatches must be loud instead of silently broken. Bump together with
 // PROTOCOL_VERSION in tools/chrome-extension/background.js on breaking
 // changes only (additive fields don't count); see CONTRIBUTING.md.
-constexpr long long WS_PROTOCOL_VERSION = 1;
+constexpr long long WS_PROTOCOL_VERSION = WS_AUDIO_PROTOCOL_VERSION; // core-shared
 // win-wasapi window-helpers: WINDOW_PRIORITY_EXE. Matching by exe keeps the
 // capture attached while window titles change (browser tabs).
 constexpr int WINDOW_PRIORITY_EXE = 2;
@@ -96,25 +100,6 @@ std::string wide_to_utf8(const wchar_t *w)
 	os_wcs_to_utf8_ptr(w, 0, &p);
 	std::string out = p ? p : "";
 	bfree(p);
-	return out;
-}
-
-// Executable base name (lowercase) of a process, "" when unavailable.
-std::string pid_exe_lower(DWORD pid)
-{
-	if (!pid)
-		return "";
-	HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-	if (!h)
-		return "";
-	wchar_t path[MAX_PATH];
-	DWORD len = MAX_PATH;
-	std::string out;
-	if (QueryFullProcessImageNameW(h, 0, path, &len)) {
-		const wchar_t *base = wcsrchr(path, L'\\');
-		out = to_lower(wide_to_utf8(base ? base + 1 : path));
-	}
-	CloseHandle(h);
 	return out;
 }
 
@@ -274,6 +259,7 @@ struct audio_wall_engine {
 	float geo_dist = -1.0f;
 	float geo_curve = -1.0f;
 	float geo_yaw_off = 0.0f;
+	float geo_center_off = 0.0f;
 	uint32_t geo_map_gen = 0;
 
 	std::mutex exclude_mutex;
@@ -327,43 +313,6 @@ struct audio_wall_engine {
 
 namespace {
 
-// Wall texture coordinate of a physical desktop x position, using the
-// Display Wall's published layout. Positions outside the wall monitors
-// (excluded displays, the glasses display...) extrapolate linearly with the
-// nearest monitor's scale, so a screen to the right of the wall sounds from
-// beyond the wall's right edge instead of merging with it; the result may
-// leave 0..1 and the caller bounds it. False when no wall exists.
-bool wall_u_from_desktop_x(double x, double *u_out)
-{
-	nyan_wall_monitor_map map[16];
-	const size_t n = nyan_real_get_wall_monitor_map(map, 16);
-	if (!n)
-		return false;
-	const nyan_wall_monitor_map *nearest = nullptr;
-	double nearest_dist = 0.0;
-	for (size_t i = 0; i < n; i++) {
-		const nyan_wall_monitor_map &m = map[i];
-		if (m.desk_right <= m.desk_left)
-			continue;
-		const double d = x < m.desk_left
-					 ? m.desk_left - x
-					 : (x > m.desk_right ? x - m.desk_right
-							     : 0.0);
-		if (!nearest || d < nearest_dist) {
-			nearest = &m;
-			nearest_dist = d;
-		}
-		if (d == 0.0)
-			break;
-	}
-	if (!nearest)
-		return false;
-	const double t = (x - nearest->desk_left) /
-			 (nearest->desk_right - nearest->desk_left);
-	*u_out = nearest->u_left + t * (nearest->u_right - nearest->u_left);
-	return true;
-}
-
 // Exact bearing of a desktop position as rendered by the virtual screen:
 // desktop x -> wall texture u -> world position on the (flat or curved)
 // screen -> azimuth from the viewer. False only before the first virtual
@@ -373,41 +322,22 @@ bool auto_azimuth_deg(float norm_x, double *out_deg)
 {
 	const double half_w =
 		g_device.screen_half_width_m.load(std::memory_order_relaxed);
-	const double dist = clampd(
-		g_device.screen_distance_m.load(std::memory_order_relaxed),
-		MIN_SCREEN_DISTANCE_M, MAX_SCREEN_DISTANCE_M);
 	if (half_w <= 1e-4)
 		return false;
 
+	// norm_x is the tab/window x as a fraction of the virtual desktop;
+	// reconstruct its desktop px and map it through the wall layout. The
+	// u -> world -> azimuth step (distance, curve, center-display shift,
+	// cylinder yaw) is shared with the warp and the standalone backend in
+	// wall_u_to_bearing_deg.
 	const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
 	const int vw = std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
 	const double desk_x =
 		vx + (clampd(norm_x, -0.5, 0.5) + 0.5) * vw;
 	double u;
-	if (!wall_u_from_desktop_x(desk_x, &u))
-		u = clampd(norm_x, -0.5, 0.5) + 0.5; // wall == desktop
-	// Up to half a wall width beyond each edge for off-wall displays;
-	// the final bearing is clamped to +-90 by the filter anyway.
-	const double off = (clampd(u, -0.5, 1.5) - 0.5) * 2.0 * half_w;
-
-	const double curve = clampd(
-		g_device.screen_curve.load(std::memory_order_relaxed), 0.0,
-		MAX_SCREEN_CURVE);
-	double az;
-	if (curve <= 0.0001) {
-		az = std::atan2(off, dist);
-	} else {
-		// Same cylinder as the warp shader: radius D/curve, screen
-		// center kept at distance D, off is the arc length.
-		const double radius = dist / curve;
-		const double theta = off / radius;
-		az = std::atan2(radius * std::sin(theta),
-				dist - radius * (1.0 - std::cos(theta)));
-	}
-	// The render path turns the world by the center-display yaw; shift
-	// the bearings the same way so audio keeps matching the picture.
-	*out_deg = az * 180.0 / PI -
-		   g_device.screen_yaw_offset_deg.load(std::memory_order_relaxed);
+	if (!wall_u_from_desktop_x(nyan_real_get_wall_monitor_map(), desk_x, &u))
+		u = clampd(norm_x, -0.5, 0.5) + 0.5; // wall == desktop (cold start)
+	*out_deg = wall_u_to_bearing_deg(u);
 	return true;
 }
 
@@ -684,12 +614,9 @@ void release_ws_stream_locked(audio_wall_engine *wall, ws_stream &st)
 
 void wall_ws_text(audio_wall_engine *wall, uint64_t conn, const nyan_json &msg)
 {
-	const std::string type = nyan_json_get_string(msg, "type");
-	const uint64_t key = (conn << 32) |
-			     (static_cast<uint64_t>(nyan_json_get_int(
-				      msg, "stream")) &
-			      0xFFFFFFFFULL);
-	if (type == "close") {
+	const ws_audio_msg m = ws_audio_parse_msg(msg); // shared core decode
+	const uint64_t key = (conn << 32) | m.stream;
+	if (m.is_close) {
 		std::lock_guard<std::mutex> lk(wall->children_mutex);
 		auto it = wall->ws_streams.find(key);
 		if (it != wall->ws_streams.end()) {
@@ -704,11 +631,11 @@ void wall_ws_text(audio_wall_engine *wall, uint64_t conn, const nyan_json &msg)
 		}
 		return;
 	}
-	if (type != "meta")
+	if (!m.is_meta)
 		return;
 
 	std::lock_guard<std::mutex> lk(wall->children_mutex);
-	const long long proto = nyan_json_get_int(msg, "v");
+	const long long proto = m.proto;
 	if (proto != WS_PROTOCOL_VERSION) {
 		if (wall->ws_proto_mismatch.exchange(
 			    proto, std::memory_order_relaxed) != proto)
@@ -725,20 +652,15 @@ void wall_ws_text(audio_wall_engine *wall, uint64_t conn, const nyan_json &msg)
 			wall->props_dirty.store(true, std::memory_order_relaxed);
 	}
 	ws_stream &st = wall->ws_streams[key];
-	st.norm_x = static_cast<float>(
-		clampd(nyan_json_get_double(msg, "norm_x"), -0.5, 0.5));
-	const std::string label = nyan_json_get_string(msg, "label");
-	if (!label.empty() && st.label != label) {
-		st.label = label;
+	st.norm_x = static_cast<float>(clampd(m.norm_x, -0.5, 0.5));
+	if (!m.label.empty() && st.label != m.label) {
+		st.label = m.label;
 		wall->props_dirty.store(true, std::memory_order_relaxed);
 	}
-	const long long sr = nyan_json_get_int(msg, "sample_rate");
-	if (sr >= 8000 && sr <= 192000)
-		st.sample_rate = static_cast<uint32_t>(sr);
-	st.channels = nyan_json_get_int(msg, "channels") == 1 ? 1 : 2;
-	const std::string exe = nyan_json_get_string(msg, "exe");
-	if (!exe.empty())
-		st.exe = to_lower(exe);
+	st.sample_rate = m.sample_rate;
+	st.channels = m.channels;
+	if (!m.exe.empty())
+		st.exe = to_lower(m.exe);
 	st.last_rx_ns = os_gettime_ns();
 
 	if (!st.source) {
@@ -780,12 +702,11 @@ void wall_ws_text(audio_wall_engine *wall, uint64_t conn, const nyan_json &msg)
 void wall_ws_binary(audio_wall_engine *wall, uint64_t conn, const uint8_t *data,
 		    size_t len)
 {
-	if (len < 4)
+	uint32_t sid = 0;
+	const int16_t *pcm = nullptr;
+	size_t pcm_bytes = 0;
+	if (!ws_audio_parse_frame(data, len, sid, pcm, pcm_bytes)) // shared decode
 		return;
-	const uint32_t sid = static_cast<uint32_t>(data[0]) |
-			     (static_cast<uint32_t>(data[1]) << 8) |
-			     (static_cast<uint32_t>(data[2]) << 16) |
-			     (static_cast<uint32_t>(data[3]) << 24);
 	const uint64_t key = (conn << 32) | sid;
 	obs_source_t *source = nullptr;
 	uint32_t sample_rate = 48000;
@@ -803,10 +724,10 @@ void wall_ws_binary(audio_wall_engine *wall, uint64_t conn, const uint8_t *data,
 	if (!source)
 		return;
 	const uint32_t frames = static_cast<uint32_t>(
-		(len - 4) / (sizeof(int16_t) * channels));
+		pcm_bytes / (sizeof(int16_t) * channels));
 	if (frames) {
 		obs_source_audio audio = {};
-		audio.data[0] = data + 4;
+		audio.data[0] = reinterpret_cast<const uint8_t *>(pcm);
 		audio.frames = frames;
 		audio.speakers = channels == 1 ? SPEAKERS_MONO
 					       : SPEAKERS_STEREO;
@@ -949,22 +870,9 @@ void wall_update(void *data, obs_data_t *settings)
 	wall->distance_gain.store(obs_data_get_bool(settings, "distance_gain"),
 				  std::memory_order_relaxed);
 
-	std::vector<std::string> exclude;
-	std::string item;
 	const char *raw = obs_data_get_string(settings, "exclude");
-	for (const char *p = raw ? raw : "";; p++) {
-		if (*p && *p != ',' && *p != ';') {
-			if (!std::isspace(static_cast<unsigned char>(*p)))
-				item += *p;
-			continue;
-		}
-		if (!item.empty()) {
-			exclude.push_back(to_lower(item));
-			item.clear();
-		}
-		if (!*p)
-			break;
-	}
+	std::vector<std::string> exclude =
+		parse_audio_exclude_list(raw ? raw : "");
 	{
 		std::lock_guard<std::mutex> lk(wall->exclude_mutex);
 		wall->exclude = std::move(exclude);
@@ -1150,16 +1058,20 @@ void wall_tick(void *data, float)
 			std::memory_order_relaxed);
 		const float yaw_off = g_device.screen_yaw_offset_deg.load(
 			std::memory_order_relaxed);
+		const float center_off = g_device.screen_center_off_m.load(
+			std::memory_order_relaxed);
 		const uint32_t gen = nyan_real_wall_map_generation();
 		if (std::fabs(half_w - wall->geo_half_w) > 0.005f ||
 		    std::fabs(dist - wall->geo_dist) > 0.005f ||
 		    std::fabs(curve - wall->geo_curve) > 0.005f ||
 		    std::fabs(yaw_off - wall->geo_yaw_off) > 0.05f ||
+		    std::fabs(center_off - wall->geo_center_off) > 0.005f ||
 		    gen != wall->geo_map_gen) {
 			wall->geo_half_w = half_w;
 			wall->geo_dist = dist;
 			wall->geo_curve = curve;
 			wall->geo_yaw_off = yaw_off;
+			wall->geo_center_off = center_off;
 			wall->geo_map_gen = gen;
 			wall->filters_dirty.store(true,
 						  std::memory_order_relaxed);
@@ -1248,11 +1160,21 @@ void register_nyan_real_ws_audio_source()
 // children capture and monitor the audio themselves; the engine only keeps
 // them active (via the host's enum_active_sources) and feeds their filters.
 
+// Count of enabled audio walls, so the virtual screen can warn (in the warp)
+// when the spatial-audio output is the Windows default device.
+static std::atomic<int> g_audio_wall_count{0};
+
+bool nyan_real_audio_wall_active()
+{
+	return g_audio_wall_count.load(std::memory_order_relaxed) > 0;
+}
+
 audio_wall_engine *audio_wall_create(obs_source_t *parent)
 {
 	auto *wall = new audio_wall_engine();
 	wall->context = parent;
 	wall->poll_thread = std::thread(poll_thread_fn, wall);
+	g_audio_wall_count.fetch_add(1, std::memory_order_relaxed);
 	blog(LOG_INFO, "[obs-nyan-real-3dof] audio wall enabled");
 	return wall;
 }
@@ -1260,6 +1182,7 @@ audio_wall_engine *audio_wall_create(obs_source_t *parent)
 void audio_wall_destroy(audio_wall_engine *engine)
 {
 	wall_destroy(engine);
+	g_audio_wall_count.fetch_sub(1, std::memory_order_relaxed);
 	blog(LOG_INFO, "[obs-nyan-real-3dof] audio wall disabled");
 }
 

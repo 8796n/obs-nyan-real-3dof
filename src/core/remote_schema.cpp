@@ -44,6 +44,13 @@ transport_traits current_traits()
 	return traits_for(detected_transport_for(&g_device));
 }
 
+// The detected model's profile. Brightness / convergence support is per-model
+// (BT-40 yes, BT-30C no), so those rows gate on the profile, not the transport.
+const model_profile &current_profile()
+{
+	return profile_for(detected_hid_model(&g_device));
+}
+
 void set_v(nyan_json &row, bool v)
 {
 	row["v"] = v;
@@ -129,7 +136,8 @@ const remote_row STATUS_ROWS[] = {
 		 set_v(r, std::to_string(g_device.virtual_source_count.load(
 				 std::memory_order_relaxed))
 				  .c_str());
-	 }},
+	 },
+	 nullptr, []() { return nyan_caps().virtual_sources; }},
 };
 
 // --- デバイス操作 -------------------------------------------------------
@@ -150,7 +158,7 @@ const remote_row DEVICE_ROWS[] = {
 				 std::lround(nyan_json_get_double(m, "v"))),
 			 std::memory_order_relaxed);
 	 },
-	 []() { return current_traits().display_brightness; }},
+	 []() { return current_profile().display_brightness; }},
 	{"autobright", "autobright", "toggle", 0, 0, 0,
 	 [](nyan_json &r) {
 		 const int autob = g_device.autobright_current.load(
@@ -163,7 +171,7 @@ const remote_row DEVICE_ROWS[] = {
 			 nyan_json_get_bool(m, "v") ? 1 : 0,
 			 std::memory_order_relaxed);
 	 },
-	 []() { return current_traits().display_brightness; }},
+	 []() { return current_profile().display_autobright; }},
 	{"convergence_link", "convergence_link", "toggle", 0, 0, 0,
 	 [](nyan_json &r) {
 		 set_v(r, g_device.convergence_link.load(
@@ -175,7 +183,7 @@ const remote_row DEVICE_ROWS[] = {
 		 g_device.convergence_link.store(nyan_json_get_bool(m, "v"),
 						 std::memory_order_relaxed);
 	 },
-	 []() { return current_traits().display_brightness; }},
+	 []() { return current_profile().display_distance; }},
 	{"displaymode", "displaymode", "combo", 0, 0, 0,
 	 [](nyan_json &r) {
 		 const transport_traits tr = current_traits();
@@ -258,7 +266,8 @@ const remote_row OUTPUT_ROWS[] = {
 		 // Needs Qt; the dock poll consumes the request.
 		 g_device.projector_request.store(true,
 						  std::memory_order_relaxed);
-	 }},
+	 },
+	 []() { return nyan_caps().projector; }},
 	{"auto_projector", "dock.auto_projector", "toggle", 0, 0, 0,
 	 [](nyan_json &r) {
 		 set_v(r, g_device.auto_projector.load(
@@ -267,7 +276,8 @@ const remote_row OUTPUT_ROWS[] = {
 	 [](const nyan_json &m) {
 		 g_device.auto_projector.store(nyan_json_get_bool(m, "v"),
 					       std::memory_order_relaxed);
-	 }},
+	 },
+	 []() { return nyan_caps().projector; }},
 	{"sbs_output", "sbs_output", "combo", 0, 0, 0,
 	 [](nyan_json &r) {
 		 nyan_json options = nyan_json::array();
@@ -299,8 +309,10 @@ const remote_row OUTPUT_ROWS[] = {
 		 nyan_json options = nyan_json::array();
 		 push_option(options, "@auto",
 			     nyan_text("dock.monitor_out.auto"));
-		 push_option(options, "@keep",
-			     nyan_text("dock.monitor_out.keep"));
+		 // "leave the host's monitoring as-is" is an OBS-only notion.
+		 if (nyan_caps().obs_monitoring_keep)
+			 push_option(options, "@keep",
+				     nyan_text("dock.monitor_out.keep"));
 		 struct ctx_t {
 			 nyan_json *options;
 			 const std::string *sel_id;
@@ -386,15 +398,6 @@ const remote_row OUTPUT_ROWS[] = {
 // --- 仮想スクリーン -----------------------------------------------------
 
 const remote_row SCREEN_ROWS[] = {
-	{"connect_enabled", "pose_follow", "toggle", 0, 0, 0,
-	 [](nyan_json &r) {
-		 set_v(r, g_device.connect_enabled.load(
-				  std::memory_order_relaxed));
-	 },
-	 [](const nyan_json &m) {
-		 manager_set_connect_enabled(&g_device,
-					     nyan_json_get_bool(m, "v"));
-	 }},
 	{"prediction_ms", "prediction_ms", "slider", 0, 50, 1,
 	 [](nyan_json &r) {
 		 set_v(r, static_cast<double>(g_device.prediction_ms.load(
@@ -501,6 +504,11 @@ const remote_row SCREEN_ROWS[] = {
 			  diag_m / 0.0254, apparent);
 		 set_v(r, text);
 	 }},
+	// Gyro-bias recalibration: rarely used, so it lives here in the settings
+	// mirror (matching the dock, where it moved out of the top action row).
+	// Center and the 3DoF toggle stay on the remote's main page instead.
+	{"recal", "recalibrate", "action", 0, 0, 0, nullptr,
+	 [](const nyan_json &) { manager_recalibrate(&g_device); }},
 };
 
 // --- 詳細設定 -----------------------------------------------------------
@@ -565,11 +573,27 @@ const remote_section SECTIONS[] = {
 	{"dock.advanced", ADVANCED_ROWS, std::size(ADVANCED_ROWS)},
 };
 
+// Host-specific rows (the standalone's Display / Audio Wall); see the header.
+void (*g_host_build)(nyan_json &sections) = nullptr;
+bool (*g_host_apply)(const nyan_json &msg) = nullptr;
+
 } // namespace
+
+void remote_schema_set_host_provider(void (*build)(nyan_json &sections),
+				     bool (*apply)(const nyan_json &msg))
+{
+	g_host_build = build;
+	g_host_apply = apply;
+}
 
 void remote_schema_build_cfg(nyan_json &cfg)
 {
 	nyan_json sections = nyan_json::array();
+	// Host-specific sections first (standalone Display / Audio Wall; none on
+	// OBS), then the shared g_device sections, then the page appends its own
+	// device-local rows - so the order reads host-only -> shared -> per-device.
+	if (g_host_build)
+		g_host_build(sections);
 	for (const remote_section &sec : SECTIONS) {
 		nyan_json rows = nyan_json::array();
 		for (size_t i = 0; i < sec.count; i++) {
@@ -600,6 +624,26 @@ void remote_schema_build_cfg(nyan_json &cfg)
 		}
 	}
 	cfg["sections"] = std::move(sections);
+
+	// Wall focus picker: the focusable displays (non-glasses, Windows-number
+	// sorted) plus the current pick, rendered as number buttons on the
+	// remote's main page. Enumerates monitors like the dock's focus combo;
+	// only built while a client is connected (the sync poll gates this).
+	nyan_json wall = nyan_json::array();
+	for (const monitor_entry &m : filter_monitors(enumerate_monitors(),
+						      /*include_primary=*/true,
+						      /*exclude_glasses=*/true, "",
+						      "")) {
+		nyan_json d = nyan_json::object();
+		d["n"] = m.windows_number;
+		d["name"] = m.friendly_name.empty() ? m.label : m.friendly_name;
+		wall.push_back(std::move(d));
+	}
+	cfg["wall"] = std::move(wall);
+	cfg["focus"] = g_device.focus_display.load(std::memory_order_relaxed);
+	// Head-pose follow (3DoF), surfaced as a toggle on the remote's main page
+	// next to Center (mirrors the dock's eye-icon, not a settings row).
+	cfg["pose"] = g_device.pose_follow.load(std::memory_order_relaxed);
 }
 
 bool remote_schema_apply(const nyan_json &msg)
@@ -629,5 +673,8 @@ bool remote_schema_apply(const nyan_json &msg)
 			return true;
 		}
 	}
+	// Not a shared (g_device) key: let the host try its own rows.
+	if (g_host_apply)
+		return g_host_apply(msg);
 	return false;
 }

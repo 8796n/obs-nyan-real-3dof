@@ -43,8 +43,11 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 		f->ip = next_ip;
 		f->port = next_port;
 	}
-	const bool next_connect_enabled =
-		get_bool_setting(settings, "connect_enabled", true);
+	// OBS has no master toggle (connect_enabled was the old connect checkbox,
+	// now repurposed to pose_follow in the shared dock), so the plugin always
+	// tracks - disable via the OBS source's visibility instead. Force it on so a
+	// stale saved "false" cannot leave OBS with no way to re-enable tracking.
+	const bool next_connect_enabled = true;
 	reconnect = reconnect ||
 		    (f->connect_enabled.load(std::memory_order_relaxed) !=
 		     next_connect_enabled);
@@ -74,6 +77,13 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings)
 	f->convergence_link.store(
 		get_bool_setting(settings, "convergence_link", false),
 		std::memory_order_relaxed);
+	f->offscreen_indicator.store(
+		get_bool_setting(settings, "offscreen_indicator", true),
+		std::memory_order_relaxed);
+	f->pose_follow.store(get_bool_setting(settings, "pose_follow", true),
+			     std::memory_order_relaxed);
+	manager_set_focus_display(
+		f, static_cast<int>(obs_data_get_int(settings, "focus_display")));
 	f->mag_yaw.store(get_bool_setting(settings, "mag_yaw", false),
 			 std::memory_order_relaxed);
 	f->auto_projector.store(get_bool_setting(settings, "auto_projector", false),
@@ -155,6 +165,32 @@ void recenter_hotkey(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
 	manager_recenter(&g_device);
 }
 
+void focus_next_hotkey(void *, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (pressed)
+		manager_focus_cycle(&g_device, +1);
+}
+
+void focus_prev_hotkey(void *, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (pressed)
+		manager_focus_cycle(&g_device, -1);
+}
+
+void focus_off_hotkey(void *, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (pressed)
+		manager_set_focus_display(&g_device, 0);
+}
+
+void pose_follow_hotkey(void *, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (!pressed)
+		return;
+	const bool v = !g_device.pose_follow.load(std::memory_order_relaxed);
+	g_device.pose_follow.store(v, std::memory_order_relaxed);
+}
+
 void manager_save_load(obs_data_t *save_data, bool saving, void *)
 {
 	const char *key = "nyan-real-3dof";
@@ -187,6 +223,15 @@ void manager_save_load(obs_data_t *save_data, bool saving, void *)
 		obs_data_set_bool(obj, "convergence_link",
 				  g_device.convergence_link.load(
 					  std::memory_order_relaxed));
+		obs_data_set_bool(obj, "offscreen_indicator",
+				  g_device.offscreen_indicator.load(
+					  std::memory_order_relaxed));
+		obs_data_set_bool(obj, "pose_follow",
+				  g_device.pose_follow.load(
+					  std::memory_order_relaxed));
+		obs_data_set_int(obj, "focus_display",
+				 g_device.focus_display.load(
+					 std::memory_order_relaxed));
 		obs_data_set_bool(obj, "mag_yaw",
 				  g_device.mag_yaw.load(std::memory_order_relaxed));
 		obs_data_set_bool(obj, "auto_projector",

@@ -8,25 +8,19 @@
 #include <vector>
 
 #include "glasses_display.h"
+#include "wall_layout.h" // core wall_monitor_map (published below)
 
 void register_nyan_real_display_wall_source();
 
-// Desktop-to-wall-texture mapping of one wall monitor, published by the
-// Display Wall whenever it lays out its children. The Audio Wall uses it to
-// turn a window's desktop position into the horizontal texture coordinate
+// The Display Wall publishes its desktop->wall-texture mapping (core
+// wall_monitor_map) whenever it lays out its children. The Audio Wall uses it
+// to turn a window's desktop position into the horizontal texture coordinate
 // the virtual screen actually renders, so audio bearings line up with the
 // video without a manually tuned spread. With multiple Display Wall sources
 // the most recent layout wins.
-struct nyan_wall_monitor_map {
-	long desk_left = 0; // physical desktop px
-	long desk_right = 0;
-	float u_left = 0.0f; // wall texture coordinate, 0..1
-	float u_right = 0.0f;
-};
 
-// Copies up to max_count entries; returns the number copied (0 = no wall).
-size_t nyan_real_get_wall_monitor_map(nyan_wall_monitor_map *out,
-				      size_t max_count);
+// Returns a copy of the current map (empty = no wall).
+std::vector<wall_monitor_map> nyan_real_get_wall_monitor_map();
 // Bumps on every published layout; cheap change detection for callers.
 uint32_t nyan_real_wall_map_generation();
 // Wall texture u (0..1) of the chosen center display's middle, published

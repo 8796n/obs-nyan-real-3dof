@@ -73,6 +73,16 @@ static const display_mode_option viture_display_modes[] = {
 	{0x32, "displaymode.mode3dsbs"},
 };
 
+// EPSON MOVERIO 2D/3D switch over the serial command port (Basic Function SDK
+// "set2d3d 0" = 2D, "set2d3d 1" = 3D / side-by-side = Half-SBS). Both the BT-40
+// and BT-30C support it. 3D expects a side-by-side frame; sbs_output_active
+// treats "3D selected" as SBS-on in auto mode (Half-SBS at 1920x1080 cannot be
+// detected from the output size), so picking 3D enables SBS unless it is off.
+static const display_mode_option moverio_display_modes[] = {
+	{0, "displaymode.moverio2d"},
+	{1, "displaymode.moverio3d"},
+};
+
 transport_traits traits_for(imu_transport t)
 {
 	switch (t) {
@@ -86,9 +96,10 @@ transport_traits traits_for(imu_transport t)
 		return {"transport.rayneo_hid", false, true, false};
 	case imu_transport::sensor_api:
 		// IMU streams through the Sensor API rather than raw HID
-		// reports. MOVERIO has no hardware brightness control; the
-		// dock exposes it through the device's serial command port.
-		return {"transport.sensor_api", false, false, true};
+		// reports. Brightness/convergence are per-model (profile flags);
+		// the 2D/3D (Half-SBS) switch is shared by all MOVERIO.
+		return {"transport.sensor_api", false, false, true,
+			moverio_display_modes, std::size(moverio_display_modes)};
 	case imu_transport::rokid_hid:
 		return {"transport.rokid_hid", false, true, false};
 	case imu_transport::viture_hid:
@@ -144,13 +155,16 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 			      "EPSON MOVERIO BT-40"};
 	bt40.optics_focus_m = 4.6f;
 	bt40.display_distance = true;
+	bt40.display_brightness = true;
+	bt40.display_autobright = true; // BT-30C has manual brightness but no auto
 	// EPSON MOVERIO BT-30C: same Sensor API IMU + serial command port
 	// layout as the BT-40, on a 1280x720 panel with 23 deg diagonal FOV
 	// per the published spec. USB product string "Moverio BT-30C HID-CDC"
 	// (hardware-confirmed 2026-06).
-	const model_profile bt30c = {imu_transport::sensor_api,
-				     MOUNT_X_DEG_MOVERIO, 23.0f, 1280, 720,
-				     "EPSON MOVERIO BT-30C"};
+	model_profile bt30c = {imu_transport::sensor_api,
+			       MOUNT_X_DEG_MOVERIO, 23.0f, 1280, 720,
+			       "EPSON MOVERIO BT-30C"};
+	bt30c.display_brightness = true; // manual brightness, but no auto mode
 	// Rokid Max / Air stream fixed 64-byte packets on a vendor HID
 	// interface without any start command. Both share PID 0x162F and are
 	// told apart by the product string containing "Max" (mirrors the
@@ -166,17 +180,17 @@ static void append_builtin_devices(std::vector<device_entry> &out)
 					 MOUNT_X_DEG_ROKID_AIR, 43.0f, 1920,
 					 1080, "Rokid Air"};
 	// VITURE glasses fuse orientation on-board and stream euler angles
-	// over a vendor HID interface after an enable command. FOV and pitch
-	// adjustments follow XRLinuxDriver's metadata (One 40 deg / +6 deg,
-	// Pro 43 deg / +3 deg).
+	// over a vendor HID interface after an enable command. Diagonal FOV uses
+	// VITURE's published specs (One / One Lite 43 deg, Pro 46 deg); the pitch
+	// (mount) follows XRLinuxDriver's metadata (One +6 deg, Pro +3 deg).
 	const model_profile viture_one = {imu_transport::viture_hid,
-					  MOUNT_X_DEG_VITURE_ONE, 40.0f, 1920,
+					  MOUNT_X_DEG_VITURE_ONE, 43.0f, 1920,
 					  1080, "VITURE One"};
 	const model_profile viture_one_lite = {imu_transport::viture_hid,
-					       MOUNT_X_DEG_VITURE_ONE, 40.0f,
+					       MOUNT_X_DEG_VITURE_ONE, 43.0f,
 					       1920, 1080, "VITURE One Lite"};
 	const model_profile viture_pro = {imu_transport::viture_hid,
-					  MOUNT_X_DEG_VITURE_PRO, 43.0f, 1920,
+					  MOUNT_X_DEG_VITURE_PRO, 46.0f, 1920,
 					  1080, "VITURE Pro"};
 	// Nreal Light ("Nreal X" in mainland China): raw IMU from the OV580
 	// coprocessor at 1000 Hz. 52 deg diagonal FOV per the published spec.
@@ -435,6 +449,10 @@ static void append_user_devices(std::vector<device_entry> &out,
 		// only meaningful on sensor_api devices with the command port.
 		e.profile.display_distance =
 			json_bool(item, "display_distance", false);
+		e.profile.display_brightness =
+			json_bool(item, "display_brightness", false);
+		e.profile.display_autobright =
+			json_bool(item, "display_autobright", false);
 		const std::string product = json_str(item, "product_contains");
 		if (!product.empty())
 			e.product_contains = utf8_to_wide(product);

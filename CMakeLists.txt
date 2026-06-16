@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(obs-nyan-real-3dof VERSION 0.7.0 LANGUAGES C CXX)
+project(obs-nyan-real-3dof VERSION 0.8.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -33,7 +33,10 @@ add_library(nyan_core STATIC
   src/core/hid_io.cpp
   src/core/monitor_enum.cpp
   src/core/wall_layout.cpp
+  src/core/warp_params.cpp
   src/core/ws_server.cpp
+  src/core/ws_audio.cpp
+  src/core/audio_exclude.cpp
   src/core/remote_schema.cpp
   src/core/remote_control.cpp
   src/core/transports/xreal_tcp.cpp
@@ -57,6 +60,8 @@ target_sources(obs-nyan-real-3dof PRIVATE
   src/app/obs/plugin-main.cpp
   src/app/obs/dock_host_obs.cpp
   src/platform/win/cursor_fence.cpp
+  src/platform/win/process_util.cpp
+  src/platform/win/endpoint_volume.cpp
   src/platform/obs/device_settings_obs.cpp
   src/platform/obs/virtual_source.cpp
   src/platform/obs/display-wall-source.cpp
@@ -94,7 +99,7 @@ if(Qt6_FOUND)
   # creates and hosts the widget. The private paths are the OBS-free helpers it
   # still uses (platform/win cursor_fence.h, qrcodegen); their symbols resolve
   # at the final link of the host.
-  add_library(nyan_ui STATIC src/ui/dock.cpp)
+  add_library(nyan_ui STATIC src/ui/dock.cpp src/ui/overlay_text.cpp)
   target_link_libraries(nyan_ui PUBLIC nyan_core PRIVATE Qt6::Widgets)
   target_include_directories(nyan_ui
     PUBLIC "${CMAKE_SOURCE_DIR}/src/ui"
