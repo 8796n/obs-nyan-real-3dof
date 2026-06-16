@@ -3,6 +3,7 @@
 #include "nyan_host.h"
 
 namespace {
+nyan_host_caps g_caps; // defaults = OBS (all capabilities present)
 const char *(*g_text)(const char *) = nullptr;
 const char *(*g_locale)() = nullptr;
 void (*g_audio_enum)(nyan_audio_output_cb, void *) = nullptr;
@@ -12,6 +13,16 @@ void (*g_audio_mon_reset)() = nullptr;
 bool (*g_open_glasses_output)(int, bool) = nullptr;
 void (*g_track_glasses_output)(int) = nullptr;
 void (*g_close_glasses_output)() = nullptr;
+}
+
+const nyan_host_caps &nyan_caps()
+{
+	return g_caps;
+}
+
+void nyan_set_caps(const nyan_host_caps &caps)
+{
+	g_caps = caps;
 }
 
 void nyan_set_text_provider(const char *(*provider)(const char *))

@@ -39,6 +39,18 @@ $cfg = "`"$CMAKE`" -G Ninja -S `"$SRC`" -B `"$BUILD`" " +
        "-DCMAKE_BUILD_TYPE=Release"
 $bld = "`"$CMAKE`" --build `"$BUILD`""
 
+# The standalone is a tray-resident app, so a previous run is easily left running
+# and locks spatial-wall.exe - the linker then fails with LNK1104. Stop it before
+# building (harmless if not running) so the build can overwrite the exe. Note:
+# this does not cover the OBS plugin DLL while OBS itself has it loaded - close
+# OBS for that case.
+$prev = Get-Process -Name "spatial-wall" -ErrorAction SilentlyContinue
+if ($prev) {
+  Write-Host "stopping running spatial-wall.exe before build..." -ForegroundColor Yellow
+  $prev | Stop-Process -Force
+  $prev | Wait-Process -Timeout 5 -ErrorAction SilentlyContinue
+}
+
 cmd /c "`"$VCV`" && $cfg && $bld"
 if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
 Write-Host "`n=== built artifacts ===" -ForegroundColor Green

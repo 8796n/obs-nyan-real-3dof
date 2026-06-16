@@ -41,6 +41,10 @@ MODULE_EXPORT const char *obs_module_description(void)
 }
 
 static obs_hotkey_id g_recenter_hotkey_id = OBS_INVALID_HOTKEY_ID;
+static obs_hotkey_id g_focus_next_hotkey_id = OBS_INVALID_HOTKEY_ID;
+static obs_hotkey_id g_focus_prev_hotkey_id = OBS_INVALID_HOTKEY_ID;
+static obs_hotkey_id g_focus_off_hotkey_id = OBS_INVALID_HOTKEY_ID;
+static obs_hotkey_id g_pose_follow_hotkey_id = OBS_INVALID_HOTKEY_ID;
 
 // Route core (OBS-independent) logging into the OBS log. Core uses its own
 // NYAN_LOG_* values, so map them to libobs LOG_* here rather than assuming a
@@ -130,6 +134,21 @@ bool obs_module_load(void)
 	g_recenter_hotkey_id = obs_hotkey_register_frontend(
 		"nyan_real_3dof.recenter", obs_module_text("hotkey.recenter"),
 		recenter_hotkey, nullptr);
+	g_focus_next_hotkey_id = obs_hotkey_register_frontend(
+		"nyan_real_3dof.focus_next",
+		obs_module_text("hotkey.focus_next"), focus_next_hotkey,
+		nullptr);
+	g_focus_prev_hotkey_id = obs_hotkey_register_frontend(
+		"nyan_real_3dof.focus_prev",
+		obs_module_text("hotkey.focus_prev"), focus_prev_hotkey,
+		nullptr);
+	g_focus_off_hotkey_id = obs_hotkey_register_frontend(
+		"nyan_real_3dof.focus_off",
+		obs_module_text("hotkey.focus_off"), focus_off_hotkey, nullptr);
+	g_pose_follow_hotkey_id = obs_hotkey_register_frontend(
+		"nyan_real_3dof.pose_follow",
+		obs_module_text("hotkey.pose_follow"), pose_follow_hotkey,
+		nullptr);
 
 	obs_frontend_add_save_callback(manager_save_load, nullptr);
 	init_dock();
@@ -147,6 +166,14 @@ void obs_module_unload(void)
 	remote_control_shutdown();
 	if (g_recenter_hotkey_id != OBS_INVALID_HOTKEY_ID)
 		obs_hotkey_unregister(g_recenter_hotkey_id);
+	if (g_focus_next_hotkey_id != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(g_focus_next_hotkey_id);
+	if (g_focus_prev_hotkey_id != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(g_focus_prev_hotkey_id);
+	if (g_focus_off_hotkey_id != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(g_focus_off_hotkey_id);
+	if (g_pose_follow_hotkey_id != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(g_pose_follow_hotkey_id);
 	obs_frontend_remove_save_callback(manager_save_load, nullptr);
 	g_device.stop.store(true, std::memory_order_relaxed);
 	g_device.reconnect_epoch.fetch_add(1, std::memory_order_relaxed);

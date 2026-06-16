@@ -13,6 +13,7 @@
 
 #include <windows.h>
 
+#include "device_manager.h" // g_device.focus_display / wall_rebuild_gen
 #include "monitor_enum.h"
 #include "wall_layout.h"
 
@@ -79,6 +80,7 @@ struct display_wall_source {
 	// (horizontal only); empty = wall center.
 	std::string center_display;
 	std::string monitor_signature; // topology the last rebuild was built from
+	uint32_t built_wall_gen = 0;   // g_device.wall_rebuild_gen at last rebuild
 	float refresh_timer_s = 0.0f;
 	float output_sync_timer_s = -1.0f;
 	bool output_sync_queued = false;
@@ -89,6 +91,15 @@ struct display_wall_source {
 
 	uint32_t width = 0;
 	uint32_t height = 0;
+
+	// Holes left by excluded displays that sit between wall monitors; the
+	// render paints a "keep out" placeholder in each (windows layout only):
+	// one baked fill (zebra hazard zone + prohibited sign), alpha-blended.
+	std::vector<wall_placement> blocked;
+	// One keep-out fill per hole, generated at the hole's exact size (drawn 1:1
+	// so the 45-deg stripes don't skew); rebuilt when `blocked` changes.
+	std::vector<gs_texture_t *> keepout_tex;
+	bool keepout_dirty = false;
 };
 
 struct output_size_sync_task {
@@ -127,40 +138,33 @@ static void add_active_children(display_wall_source *wall)
 
 // ---- desktop -> wall-texture mapping for the Audio Wall --------------------
 static std::mutex g_wall_map_mutex;
-static std::vector<nyan_wall_monitor_map> g_wall_map;
+static std::vector<wall_monitor_map> g_wall_map;
 static std::atomic<uint32_t> g_wall_map_gen{0};
 // Wall texture u of the chosen center display's middle, -1 = auto/none.
 static std::atomic<float> g_wall_center_u{-1.0f};
 
 static void publish_wall_audio_map(display_wall_source *wall)
 {
-	std::vector<nyan_wall_monitor_map> map;
-	float center_u = -1.0f;
-	if (wall->width > 0) {
-		const float w = static_cast<float>(wall->width);
-		for (const wall_child &child : wall->children) {
-			if (!child.source || child.width == 0)
-				continue;
-			nyan_wall_monitor_map m;
-			m.desk_left = child.monitor.x;
-			m.desk_right = child.monitor.x +
-				       static_cast<long>(child.monitor.width);
-			m.u_left = static_cast<float>(child.x) / w;
-			m.u_right = static_cast<float>(child.x) / w +
-				    static_cast<float>(child.width) / w;
-			map.push_back(m);
-			// A center display that is not part of the wall (or
-			// not connected) stays -1 and behaves like auto.
-			if (!wall->center_display.empty() &&
-			    child.monitor.id == wall->center_display)
-				center_u = 0.5f * (m.u_left + m.u_right);
-		}
+	// Feed the core mapper the same children the wall actually laid out
+	// (skipping zero-width entries, as before) as a parallel layout result;
+	// the desktop->u formula and center-display selection live in core so
+	// the standalone app derives identical mappings.
+	wall_layout_result laid;
+	laid.width = wall->width;
+	for (const wall_child &child : wall->children) {
+		if (!child.source || child.width == 0)
+			continue;
+		laid.monitors.push_back(child.monitor);
+		laid.placements.push_back(
+			{child.x, child.y, child.width, child.height});
 	}
+	const wall_audio_map am =
+		compute_wall_audio_map(laid, wall->center_display);
 	{
 		std::lock_guard<std::mutex> lk(g_wall_map_mutex);
-		g_wall_map = std::move(map);
+		g_wall_map = am.monitors;
 	}
-	g_wall_center_u.store(center_u, std::memory_order_relaxed);
+	g_wall_center_u.store(am.center_u, std::memory_order_relaxed);
 	g_wall_map_gen.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -257,6 +261,8 @@ static void apply_wall_layout(display_wall_source *wall,
 	}
 	wall->width = layout.width;
 	wall->height = layout.height;
+	wall->blocked = layout.blocked;
+	wall->keepout_dirty = true; // holes changed -> rebuild the per-hole fills
 
 	publish_wall_audio_map(wall);
 	add_active_children(wall);
@@ -271,11 +277,12 @@ static void apply_layout(display_wall_source *wall,
 }
 
 static void apply_windows_layout(display_wall_source *wall,
-				 const std::vector<monitor_entry> &monitors)
+				 const std::vector<monitor_entry> &monitors,
+				 const std::vector<monitor_entry> &excluded)
 {
 	apply_wall_layout(wall, compute_windows_layout(monitors, wall->gap_x,
-						       wall->gap_y,
-						       wall->padding));
+						       wall->gap_y, wall->padding,
+						       excluded));
 }
 
 static bool obs_output_is_active()
@@ -516,13 +523,28 @@ static void rebuild_display_wall(display_wall_source *wall)
 	const uint32_t old_width = wall->width;
 	const uint32_t old_height = wall->height;
 	wall->monitor_signature = monitor_topology_signature();
+	wall->built_wall_gen =
+		g_device.wall_rebuild_gen.load(std::memory_order_relaxed);
 	const std::vector<monitor_entry> all = enumerate_monitors();
-	const std::vector<monitor_entry> selected =
+	std::vector<monitor_entry> selected =
 		filter_monitors(all, wall->include_primary, wall->exclude_glasses,
 				wall->name_filter, wall->exclude_filter);
+	// Focus mode: restrict to one display (whole wall when off / absent).
+	selected = focus_monitor(
+		selected, g_device.focus_display.load(std::memory_order_relaxed));
 
 	if (wall->mode == layout_mode::windows) {
-		apply_windows_layout(wall, selected);
+		// Displays not on the wall (the glasses, filtered-out monitors): the
+		// ones that sit between wall monitors become "no entry" placeholders
+		// (compute_windows_layout decides which); the rest are ignored.
+		std::vector<monitor_entry> excluded;
+		for (const monitor_entry &m : all)
+			if (std::none_of(selected.begin(), selected.end(),
+					 [&](const monitor_entry &s) {
+						 return s.id == m.id;
+					 }))
+				excluded.push_back(m);
+		apply_windows_layout(wall, selected, excluded);
 	} else {
 		std::vector<std::vector<monitor_entry>> rows;
 		if (wall->mode == layout_mode::rows && !wall->row_layout.empty())
@@ -611,6 +633,13 @@ static void display_wall_destroy(void *data)
 	if (wall->audio)
 		audio_wall_destroy(wall->audio);
 	release_children(wall);
+	if (!wall->keepout_tex.empty()) {
+		obs_enter_graphics();
+		for (gs_texture_t *t : wall->keepout_tex)
+			if (t)
+				gs_texture_destroy(t);
+		obs_leave_graphics();
+	}
 	delete wall;
 }
 
@@ -850,6 +879,53 @@ static void display_wall_render(void *data, gs_effect_t *)
 		obs_source_video_render(child.source);
 		gs_matrix_pop();
 	}
+
+	if (wall->blocked.empty())
+		return;
+
+	// (Re)build a keep-out fill (zebra hazard zone + baked prohibited sign) per
+	// hole at its exact size so the 45-deg stripes draw 1:1 (no stretch / angle
+	// skew) whatever the hole's aspect ratio.
+	if (wall->keepout_dirty) {
+		for (gs_texture_t *t : wall->keepout_tex)
+			if (t)
+				gs_texture_destroy(t);
+		wall->keepout_tex.clear();
+		for (const wall_placement &b : wall->blocked) {
+			const wall_rgba_bitmap z = wall_keepout_fill(
+				static_cast<int>(b.width),
+				static_cast<int>(b.height));
+			const uint8_t *data = z.rgba.data();
+			wall->keepout_tex.push_back(
+				z.width > 0 ? gs_texture_create(b.width, b.height,
+								GS_RGBA, 1, &data, 0)
+					    : nullptr);
+		}
+		wall->keepout_dirty = false;
+	}
+
+	// Draw each fill 1:1 into its hole, alpha-blended (the fill carries a
+	// uniform low alpha so the whole placeholder reads as a faint hint).
+	gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_eparam_t *image = gs_effect_get_param_by_name(def, "image");
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+	for (size_t k = 0;
+	     k < wall->blocked.size() && k < wall->keepout_tex.size(); ++k) {
+		if (!wall->keepout_tex[k])
+			continue;
+		const wall_placement &b = wall->blocked[k];
+		gs_effect_set_texture(image, wall->keepout_tex[k]);
+		while (gs_effect_loop(def, "Draw")) {
+			gs_matrix_push();
+			gs_matrix_translate3f(static_cast<float>(b.x),
+					      static_cast<float>(b.y), 0.0f);
+			gs_draw_sprite(wall->keepout_tex[k], 0, b.width,
+				       b.height);
+			gs_matrix_pop();
+		}
+	}
+	gs_blend_state_pop();
 }
 
 static void display_wall_tick(void *data, float seconds)
@@ -881,7 +957,9 @@ static void display_wall_tick(void *data, float seconds)
 		}
 	}
 	if (!missing_child &&
-	    wall->monitor_signature == monitor_topology_signature())
+	    wall->monitor_signature == monitor_topology_signature() &&
+	    wall->built_wall_gen ==
+		    g_device.wall_rebuild_gen.load(std::memory_order_relaxed))
 		return;
 	rebuild_display_wall(wall);
 }
@@ -933,14 +1011,10 @@ static obs_source_info display_wall_info = {};
 
 } // namespace
 
-size_t nyan_real_get_wall_monitor_map(nyan_wall_monitor_map *out,
-				      size_t max_count)
+std::vector<wall_monitor_map> nyan_real_get_wall_monitor_map()
 {
 	std::lock_guard<std::mutex> lk(g_wall_map_mutex);
-	const size_t n = std::min(max_count, g_wall_map.size());
-	for (size_t i = 0; i < n; i++)
-		out[i] = g_wall_map[i];
-	return n;
+	return g_wall_map;
 }
 
 uint32_t nyan_real_wall_map_generation()

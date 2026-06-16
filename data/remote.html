@@ -35,6 +35,19 @@
   }
   button:active { background: #3c3c48; }
   #top button { flex: 1; }
+  /* 3DoF (head-pose follow) toggle: small, lit blue while following. */
+  #btn-pose.active { background: #2c4a6b; border-color: #4c7bb0; color: #eaf2ff; }
+  /* Keyboard button pulses blue while the host has a typable field focused
+     (server's edit flag, from the UIA focus watch), inviting a tap. It never
+     auto-opens the panel - mobile browsers need a tap to show the keyboard. */
+  @keyframes kbdpulse { 0%, 100% { background: #222228; border-color: #34343c; } 50% { background: #2c4a6b; border-color: #4c7bb0; } }
+  #btn-kbd.hint { animation: kbdpulse 1.1s ease-in-out infinite; }
+  /* Wall focus picker: a horizontal, wrapping strip of number buttons. Hidden
+     (display:none) until the wall has 2+ focusable displays. */
+  #focus-row { display: none; flex-wrap: wrap; gap: 6px; }
+  #focus-row button { flex: 1 1 auto; min-width: 42px; padding: 9px 6px; font-size: 14px; }
+  #focus-row button.active { background: #2c4a6b; border-color: #4c7bb0; color: #eaf2ff; }
+  #focus-row .flabel { flex: 0 0 100%; font-size: 11px; color: #7e8aa0; padding: 0 2px 1px; }
   #status { display: flex; align-items: center; gap: 6px; padding: 0 4px; font-size: 12px; color: #8a8a94; }
   #dot { width: 9px; height: 9px; border-radius: 50%; background: #c0463f; flex: none; }
   #dot.on { background: #4caf50; }
@@ -48,11 +61,22 @@
   #pad.drag { border-color: #4caf50; }
   #strip {
     width: 64px; border: 1px solid #2c3340; border-radius: 14px; background: #1b2027;
-    display: flex; flex-direction: column; align-items: center; justify-content: space-between;
-    padding: 12px 0; color: #7e8aa0; font-size: 12px;
-    touch-action: none;
+    display: flex; flex-direction: column; align-items: stretch;
+    color: #7e8aa0; font-size: 12px;
+  }
+  /* The dolly gesture lives on this inner area only, so the side toggle below
+     keeps a clean hit target. */
+  #strip-dolly {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: space-between; padding: 12px 0; touch-action: none;
   }
   #strip .arrow { font-size: 16px; color: #55607a; }
+  /* Left-handed: move the distance strip to the left of the pad (flex order). */
+  #mid.strip-left #strip { order: -1; }
+  #strip-side { flex: none; background: none; border: none;
+    border-top: 1px solid #2c3340; color: #6b768c; font-size: 18px;
+    padding: 12px 0; cursor: pointer; line-height: 1; }
+  #strip-side:active { background: #232a33; }
   #dist-box { display: flex; flex-direction: column; align-items: center; gap: 4px; }
   #dist { font-size: 14px; color: #aab6cc; font-variant-numeric: tabular-nums; }
   #overlay {
@@ -90,31 +114,75 @@
     -webkit-user-select: text; user-select: text;
   }
   .cfg-row button { padding: 9px 14px; font-size: 14px; }
+  /* Keyboard panel: a full-screen overlay like #cfg. The textarea uses the
+     phone's native IME (so Japanese composes here), and "send" transmits the
+     confirmed string; the host injects it as literal Unicode. */
+  #kbd {
+    position: absolute; inset: 0; background: #141417; z-index: 10;
+    display: none; flex-direction: column; color-scheme: dark;
+    padding: 10px;
+    padding-top: calc(10px + env(safe-area-inset-top));
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+  #kbd.on { display: flex; }
+  #kbd-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  #kbd-head span { flex: 1; font-size: 16px; color: #d6d6dc; padding-left: 4px; }
+  #kbd-text {
+    width: 100%; min-height: 84px; resize: none;
+    background: #1a1a1f; color: #d6d6dc; border: 1px solid #34343c;
+    border-radius: 10px; padding: 10px; font-size: 16px; line-height: 1.5;
+    -webkit-user-select: text; user-select: text; touch-action: auto;
+  }
+  #kbd-send-row { margin-top: 8px; }
+  #kbd-send-row button { padding: 14px 8px; font-size: 15px; }
+  #btn-send-enter { color: #aab6cc; }
+  #kbd-keys { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  #kbd-keys button { flex: 1 1 auto; min-width: 52px; padding: 12px 6px; font-size: 16px; }
 </style>
 </head>
 <body>
   <div id="top" class="row">
+    <button id="btn-pose" style="flex:0 0 64px">3DoF</button>
     <button id="btn-recenter">センター</button>
-    <button id="btn-recal">再較正</button>
+    <button id="btn-kbd" style="flex:0 0 52px" aria-label="keyboard">⌨</button>
     <button id="btn-cfg" style="flex:0 0 52px" aria-label="settings">⚙</button>
     <button id="btn-fs" style="flex:0 0 52px" aria-label="fullscreen">⛶</button>
   </div>
+  <!-- Wall focus picker: number buttons for the Display Wall's monitors,
+       populated from the cfg push (wall/focus). Hidden when the wall has at
+       most one focusable display. -->
+  <div id="focus-row"></div>
   <div id="mid">
     <div id="pad"><span id="pad-title" style="font-size:15px;color:#5a5a66">タッチパッド</span><span id="pad-hint"></span></div>
     <div id="strip">
-      <span class="arrow">▲</span>
-      <div id="dist-box"><span id="dist-label">距離</span><span id="dist">-</span></div>
-      <span class="arrow">▼</span>
+      <div id="strip-dolly">
+        <span class="arrow">▲</span>
+        <div id="dist-box"><span id="dist-label">距離</span><span id="dist">-</span></div>
+        <span class="arrow">▼</span>
+      </div>
+      <button id="strip-side" aria-label="move strip">◀</button>
     </div>
   </div>
   <!-- Bump the rev when changing this file: the dim corner marker lets a
        phone verify it got the new page without devtools. Tapping it fires a
        long test vibration - a bare navigator.vibrate() check, independent of
        any gesture logic. -->
-  <div id="status"><span id="dot"></span><span id="status-text">…</span><span id="rev" style="margin-left:auto;color:#3c3c44;font-size:10px;">r11</span></div>
+  <div id="status"><span id="dot"></span><span id="status-text">…</span><span id="rev" style="margin-left:auto;color:#3c3c44;font-size:10px;">r21</span></div>
   <div id="cfg">
     <div id="cfg-head"><span id="cfg-title"></span><button id="btn-cfg-close" style="flex:0 0 80px"></button></div>
     <div id="cfg-body"></div>
+  </div>
+  <!-- Keyboard panel. Open it AFTER clicking the target field on the host via
+       the touchpad: SendInput types into whatever the host has focused, which
+       this overlay does not change. -->
+  <div id="kbd">
+    <div id="kbd-head"><span id="kbd-title"></span><button id="btn-kbd-close" style="flex:0 0 80px"></button></div>
+    <textarea id="kbd-text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+    <div id="kbd-send-row" class="row">
+      <button id="btn-send" style="flex:1"></button>
+      <button id="btn-send-enter" style="flex:0 0 42%"></button>
+    </div>
+    <div id="kbd-keys"></div>
   </div>
   <div id="overlay"></div>
 <script>
@@ -122,11 +190,14 @@
 const $ = id => document.getElementById(id);
 const DICTS = {
   ja: {
-    recenter: 'センター', recal: '再較正',
+    recenter: 'センター', recal: '再較正', pose: '姿勢追従 (3DoF)',
+    focusTitle: '注目ディスプレイ', focusAll: '全体',
     pad: 'タッチパッド',
     hint: '1本指: 移動 ・ タップ: 左クリック<br>長押し: ドラッグ (指を離しても一瞬なら継続)<br>2本指: スクロール ・ 2本指タップ: 右クリック',
     distLabel: '距離', conn: '接続中', disc: '再接続中…',
     cfgTitle: '設定', close: '閉じる',
+    kbdTitle: '文字入力', kbdPlaceholder: 'ここに入力して送信',
+    send: '送信', sendEnter: '送信+改行',
     localSec: 'リモコン操作 (この端末に保存)',
     sens: 'カーソル速度', wheelSpd: 'スクロール速度', dollySpd: '距離ホイール速度',
     holdMs: '長押し時間 (ms)', vibStr: '振動の強さ (0=オフ)',
@@ -134,11 +205,14 @@ const DICTS = {
     noToken: 'アクセストークンがありません。<br>OBS の nyan Real 3DoF ドックに表示される QR コードからこのページを開いてください。',
   },
   en: {
-    recenter: 'Center', recal: 'Recalibrate',
+    recenter: 'Center', recal: 'Recalibrate', pose: 'Head tracking (3DoF)',
+    focusTitle: 'Focus display', focusAll: 'All',
     pad: 'Touchpad',
     hint: '1 finger: move / tap: left click<br>hold: drag (brief lifts keep it going)<br>2 fingers: scroll / 2-finger tap: right click',
     distLabel: 'Distance', conn: 'Connected', disc: 'Reconnecting…',
     cfgTitle: 'Settings', close: 'Close',
+    kbdTitle: 'Text input', kbdPlaceholder: 'Type here, then send',
+    send: 'Send', sendEnter: 'Send + Enter',
     localSec: 'Remote input (saved on this device)',
     sens: 'Cursor speed', wheelSpd: 'Scroll speed', dollySpd: 'Distance wheel speed',
     holdMs: 'Hold time (ms)', vibStr: 'Vibration strength (0 = off)',
@@ -152,12 +226,17 @@ const DICTS = {
 let L = DICTS[(navigator.language || '').toLowerCase().startsWith('ja') ? 'ja' : 'en'];
 function applyLabels() {
   $('btn-recenter').textContent = L.recenter;
-  $('btn-recal').textContent = L.recal;
+  $('btn-pose').title = L.pose;
   $('pad-title').textContent = L.pad;
   $('pad-hint').innerHTML = L.hint;
   $('dist-label').textContent = L.distLabel;
   $('cfg-title').textContent = L.cfgTitle;
   $('btn-cfg-close').textContent = L.close;
+  $('kbd-title').textContent = L.kbdTitle;
+  $('btn-kbd-close').textContent = L.close;
+  $('kbd-text').placeholder = L.kbdPlaceholder;
+  $('btn-send').textContent = L.send;
+  $('btn-send-enter').textContent = L.sendEnter;
 }
 function applyLang(code) {
   if (!DICTS[code] || DICTS[code] === L) return;
@@ -166,6 +245,8 @@ function applyLang(code) {
   setStatus(wsOpen);
   cfgSig = ''; // rebuild the settings panel (local row labels) next render
   renderCfg();
+  renderFocus();
+  renderPose();
 }
 applyLabels();
 
@@ -183,6 +264,12 @@ const vibrate = ms => {
   if (t > 0 && navigator.vibrate) navigator.vibrate(t);
 };
 
+/* Distance detent: one haptic tick per real 0.5 m boundary the screen crosses
+   (driven by the server's reported distance, not finger travel), rate-limited
+   so a fast slide does not stall the motor with back-to-back vibrate() calls. */
+const DETENT_M = 0.5;
+let lastDistBucket = null, lastDetentMs = 0;
+
 /* Input coefficients, persisted per device (localStorage): screen DPI and
    finger feel differ between phones, so these are page-local settings and
    intentionally NOT part of the dock mirror (no server round-trip). */
@@ -195,6 +282,22 @@ try {
 function saveTune() {
   try { localStorage.setItem('nyanRemoteTune', JSON.stringify(TUNE)); } catch (e) {}
 }
+
+/* Distance strip side (left-handed support): a page-local layout preference,
+   persisted in localStorage and intentionally NOT mirrored to the dock. */
+let stripLeft = false;
+try { stripLeft = localStorage.getItem('nyanRemoteStripLeft') === '1'; } catch (e) {}
+function applyStripSide() {
+  $('mid').classList.toggle('strip-left', stripLeft);
+  // The arrow points where a tap sends the strip (right side -> ◀ = go left).
+  $('strip-side').textContent = stripLeft ? '▶' : '◀';
+}
+$('strip-side').addEventListener('click', () => {
+  stripLeft = !stripLeft;
+  try { localStorage.setItem('nyanRemoteStripLeft', stripLeft ? '1' : '0'); } catch (e) {}
+  applyStripSide();
+});
+applyStripSide();
 
 let ws = null, wsOpen = false, reconnectTimer = 0;
 function setStatus(on) {
@@ -209,6 +312,7 @@ function connect() {
   ws.onopen = () => { wsOpen = true; setStatus(true); };
   ws.onclose = () => {
     wsOpen = false; setStatus(false);
+    applyEdit(false); // no live focus info while disconnected
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, 1200);
   };
@@ -218,8 +322,25 @@ function connect() {
       const m = JSON.parse(ev.data);
       if (m.t === 'state' && typeof m.dist === 'number') {
         $('dist').textContent = m.dist.toFixed(2) + ' m';
+        const bucket = Math.floor(m.dist / DETENT_M);
+        if (lastDistBucket !== null && bucket !== lastDistBucket) {
+          const now = performance.now();
+          if (now - lastDetentMs >= 50) { lastDetentMs = now; vibrate(10); }
+        }
+        lastDistBucket = bucket;
         if (m.lang) applyLang(m.lang);
-      } else if (m.t === 'cfg' && Array.isArray(m.sections)) { cfgData = m; renderCfg(); }
+        if (typeof m.edit === 'boolean') applyEdit(m.edit);
+      } else if (m.t === 'cfg' && Array.isArray(m.sections)) {
+        cfgData = m;
+        // Honour the server's focus/pose unless a local tap is still settling.
+        if (typeof m.focus === 'number' && performance.now() - focusTouched > 800)
+          focusCur = m.focus;
+        if (typeof m.pose === 'boolean' && performance.now() - poseTouched > 800)
+          poseCur = m.pose;
+        renderCfg();
+        renderFocus();
+        renderPose();
+      }
     } catch (e) {}
   };
 }
@@ -342,35 +463,19 @@ function clickTap(b) {
    point on the plugin's log scale. Up = back away, down = walk closer.
    A weak haptic tick every couple of steps gives it a wheel-detent feel. */
 const DIST_PX = 7;       // px per distance step (~1.05x each)
-const DETENT_STEPS = 2;  // steps per haptic tick (~1.1x per click)
-const strip = $('strip');
+const strip = $('strip-dolly'); // the dolly gesture area (toggle button is outside)
 const stripPts = new Map();
-let detentAcc = 0, lastDetentMs = 0;
 strip.addEventListener('pointerdown', e => {
   strip.setPointerCapture(e.pointerId);
   stripPts.set(e.pointerId, e.clientY);
-  detentAcc = 0;
 });
 strip.addEventListener('pointermove', e => {
   if (!stripPts.has(e.pointerId)) return;
   const dy = e.clientY - stripPts.get(e.pointerId);
   stripPts.set(e.pointerId, e.clientY);
-  const steps = -dy / DIST_PX * TUNE.dolly;
-  pendDist += steps;
-  detentAcc += steps;
-  const clicks = Math.floor(Math.abs(detentAcc) / DETENT_STEPS);
-  if (clicks) {
-    detentAcc -= Math.sign(detentAcc) * clicks * DETENT_STEPS;
-    // Rate-limited weak pulse: every vibrate() call cancels the previous
-    // one, so rapid per-event calls without the gate would stop the motor
-    // before it spins up. (Note: Android suppresses web vibration entirely
-    // in silent ringer mode - that is OS policy, not detectable from here.)
-    const now = performance.now();
-    if (now - lastDetentMs >= 50) {
-      lastDetentMs = now;
-      vibrate(10);
-    }
-  }
+  // The haptic detent now fires on real 0.5 m boundaries from the server's
+  // reported distance (see the state handler), not on finger travel.
+  pendDist += -dy / DIST_PX * TUNE.dolly;
   flushSoon();
 });
 const stripEnd = e => stripPts.delete(e.pointerId);
@@ -378,7 +483,15 @@ strip.addEventListener('pointerup', stripEnd);
 strip.addEventListener('pointercancel', stripEnd);
 
 $('btn-recenter').addEventListener('click', () => { send({ t: 'recenter' }); vibrate(20); });
-$('btn-recal').addEventListener('click', () => { send({ t: 'recal' }); vibrate(20); });
+/* 3DoF (head-pose follow) toggle on the main page. poseCur mirrors the
+   server's pose_follow; poseTouched shields a local tap from a lagging push. */
+let poseCur = true, poseTouched = 0;
+function renderPose() { $('btn-pose').classList.toggle('active', poseCur); $('btn-pose').title = L.pose; }
+$('btn-pose').addEventListener('click', () => {
+  poseCur = !poseCur; poseTouched = performance.now();
+  send({ t: 'pose', v: poseCur }); vibrate(15); renderPose();
+});
+renderPose();
 
 /* Settings mirror: a generic renderer over the cfg snapshot the plugin
    pushes (sections/rows with type, localized label, value, options). The
@@ -386,6 +499,38 @@ $('btn-recal').addEventListener('click', () => { send({ t: 'recal' }); vibrate(2
    only. Rows touched in the last moments are not stomped by pushes. */
 let cfgData = null, cfgSig = '';
 const touched = new Map(); // row key -> last local interaction (ms)
+// row key -> row element. Keys can contain CSS-special chars (monitor ids hold
+// backslashes), so we look rows up here instead of querySelector('[data-k=..]').
+const rowEls = new Map();
+/* Wall focus picker (main page). focusCur mirrors the server's focus_display
+   (0 = whole wall); focusTouched shields a local tap from being stomped by a
+   cfg push that has not yet caught up. */
+let focusCur = 0, focusTouched = 0;
+function renderFocus() {
+  const row = $('focus-row');
+  const wall = (cfgData && Array.isArray(cfgData.wall)) ? cfgData.wall : [];
+  // Focus is meaningless with 0-1 displays; hide the row entirely.
+  if (wall.length < 2) { row.style.display = 'none'; row.textContent = ''; return; }
+  row.style.display = 'flex';
+  row.textContent = '';
+  const lab = document.createElement('div');
+  lab.className = 'flabel';
+  lab.textContent = L.focusTitle;
+  row.appendChild(lab);
+  const mk = (n, text, title) => {
+    const b = document.createElement('button');
+    b.textContent = text;
+    if (title) b.title = title;
+    if (n === focusCur) b.classList.add('active');
+    b.addEventListener('click', () => {
+      focusCur = n; focusTouched = performance.now();
+      send({ t: 'focus', n: n }); vibrate(15); renderFocus();
+    });
+    return b;
+  };
+  row.appendChild(mk(0, L.focusAll));
+  for (const d of wall) row.appendChild(mk(d.n, String(d.n), d.name || ''));
+}
 const decimals = step => { const s = String(step), d = s.indexOf('.'); return d < 0 ? 0 : s.length - d - 1; };
 function sendSet(k, v) {
   touched.set(k, performance.now());
@@ -401,6 +546,7 @@ function renderCfg() {
 function buildCfg() {
   const body = $('cfg-body');
   body.textContent = '';
+  rowEls.clear();
   for (const sec of (cfgData ? cfgData.sections : [])) {
     const h = document.createElement('div');
     h.className = 'cfg-sec';
@@ -481,6 +627,7 @@ function buildRow(r) {
   const row = document.createElement('div');
   row.className = 'cfg-row';
   row.dataset.k = r.k;
+  rowEls.set(r.k, row);
   const lab = document.createElement('span');
   lab.className = 'lab';
   lab.textContent = r.label || '';
@@ -491,6 +638,7 @@ function buildRow(r) {
   } else if (r.type === 'toggle') {
     const c = document.createElement('input');
     c.type = 'checkbox';
+    c.checked = !!r.v; // initialize here so a rebuild keeps the pushed state
     c.addEventListener('change', () => { sendSet(r.k, c.checked); vibrate(8); });
     row.append(lab, c);
   } else if (r.type === 'slider') {
@@ -503,6 +651,7 @@ function buildRow(r) {
     const s = document.createElement('input');
     s.type = 'range';
     s.min = r.min; s.max = r.max; s.step = r.step;
+    if (r.v != null) { s.value = r.v; val.textContent = (+r.v).toFixed(decimals(r.step)); }
     let lastSend = 0;
     s.addEventListener('input', () => {
       touched.set(r.k, performance.now());
@@ -520,6 +669,7 @@ function buildRow(r) {
       op.textContent = o.label;
       sel.appendChild(op);
     }
+    if (r.v != null) sel.value = r.v; // initialize so a rebuild keeps the choice
     sel.addEventListener('change', () => { sendSet(r.k, sel.value); vibrate(8); });
     row.append(lab, sel);
   } else if (r.type === 'action') {
@@ -532,6 +682,7 @@ function buildRow(r) {
     const i = document.createElement('input');
     i.type = r.type === 'number' ? 'number' : 'text';
     if (r.type === 'number') { i.min = r.min; i.max = r.max; }
+    if (r.v != null) i.value = r.v; // initialize so a rebuild keeps the value
     // Hold off remote updates while the field is being edited.
     i.addEventListener('focus', () => touched.set(r.k, performance.now() + 3600000));
     i.addEventListener('blur', () => touched.set(r.k, performance.now()));
@@ -545,7 +696,7 @@ function updateCfg() {
   const now = performance.now();
   for (const sec of cfgData.sections) {
     for (const r of sec.rows) {
-      const row = body.querySelector('[data-k="' + r.k + '"]');
+      const row = rowEls.get(r.k);
       if (!row) continue;
       row.classList.toggle('off', r.enabled === false);
       if (r.type === 'status') {
@@ -580,6 +731,62 @@ $('btn-cfg').addEventListener('click', () => {
   renderCfg();
 });
 $('btn-cfg-close').addEventListener('click', () => $('cfg').classList.remove('on'));
+
+/* Keyboard panel: compose with the phone's native IME, then send the confirmed
+   string in one message (the host types it via KEYEVENTF_UNICODE, so Japanese
+   lands as literal characters). The editing keys send named virtual keys so the
+   text already on the host can be fixed without retyping. */
+const kbdText = $('kbd-text');
+/* Host focus hint: the server's state carries edit=true while the host has a
+   typable field focused. Pulse the keyboard button (and buzz once) so a tap is
+   inviting; we never auto-open the panel - the phone's keyboard needs a tap to
+   appear anyway, and auto-opening would fight touchpad use. */
+let editHint = false;
+function applyEdit(on) {
+  on = !!on;
+  if (on === editHint) return;
+  editHint = on;
+  // No point pulsing while the panel is already open.
+  const show = on && !$('kbd').classList.contains('on');
+  $('btn-kbd').classList.toggle('hint', show);
+  if (show) vibrate(15);
+}
+$('btn-kbd').addEventListener('click', () => {
+  $('kbd').classList.add('on');
+  $('btn-kbd').classList.remove('hint'); // opened: stop inviting
+  kbdText.focus(); // pops the phone's soft keyboard; host focus is untouched
+});
+$('btn-kbd-close').addEventListener('click', () => {
+  $('kbd').classList.remove('on');
+  kbdText.blur();
+});
+function sendText(withEnter) {
+  const t = kbdText.value;
+  if (t) send({ t: 'text', s: t });
+  if (withEnter) send({ t: 'key', k: 'enter' });
+  kbdText.value = '';
+  kbdText.focus();
+  vibrate(12);
+}
+$('btn-send').addEventListener('click', () => sendText(false));
+$('btn-send-enter').addEventListener('click', () => sendText(true));
+/* Editing/navigation keys mirrored by name in remote_control.cpp's VKEYS table.
+   Symbols are language-neutral, so these need no DICTS entries. */
+const KBD_KEYS = [
+  { k: 'backspace', t: '⌫' }, { k: 'enter', t: '⏎' }, { k: 'tab', t: '⇥' },
+  { k: 'esc', t: 'Esc' }, { k: 'left', t: '←' }, { k: 'right', t: '→' },
+  { k: 'up', t: '↑' }, { k: 'down', t: '↓' },
+  { k: 'home', t: 'Home' }, { k: 'end', t: 'End' }, { k: 'del', t: 'Del' },
+];
+(function buildKbdKeys() {
+  const keys = $('kbd-keys');
+  for (const spec of KBD_KEYS) {
+    const b = document.createElement('button');
+    b.textContent = spec.t;
+    b.addEventListener('click', () => { send({ t: 'key', k: spec.k }); vibrate(8); });
+    keys.appendChild(b);
+  }
+})();
 
 /* Fullscreen (Android Chrome; iOS Safari hides the button). */
 const fsBtn = $('btn-fs');
@@ -619,7 +826,7 @@ strip.addEventListener('touchstart', stopNative, { passive: false });
    (iOS Safari, Brave, or an OS touch-feedback setting). */
 $('rev').addEventListener('click', () => {
   const ok = navigator.vibrate ? navigator.vibrate(200) : false;
-  $('rev').textContent = (navigator.vibrate ? (ok ? 'vib✓' : 'vib✗') : 'no API') + ' r11';
+  $('rev').textContent = (navigator.vibrate ? (ok ? 'vib✓' : 'vib✗') : 'no API') + ' r21';
 });
 </script>
 </body>

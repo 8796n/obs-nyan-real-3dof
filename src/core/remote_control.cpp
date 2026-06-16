@@ -6,6 +6,12 @@
 #include <iphlpapi.h>
 #include <windows.h>
 #include <wincrypt.h>
+// uiautomation.h needs the OLE/COM prerequisites (the `interface` macro and the
+// base provider interfaces). WIN32_LEAN_AND_MEAN keeps <windows.h> from pulling
+// them in, so include them explicitly here or UIAutomationCore.h fails to parse.
+#include <ole2.h>
+#include <oleacc.h>
+#include <uiautomation.h>
 
 #include <atomic>
 #include <cmath>
@@ -16,6 +22,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "device_manager.h"
@@ -76,6 +83,15 @@ struct remote_state {
 	std::mutex url_mutex;
 	std::string cached_ip;
 	uint64_t cached_ip_ms = 0;
+
+	// Focus watch (UI Automation): true while the host's focused control is a
+	// typable text field, pushed to the phone in state_json so the remote can
+	// light its keyboard button. The watcher only runs while a phone is
+	// connected, so an idle remote puts no accessibility load on other apps.
+	std::atomic<bool> edit_focused{false};
+	std::thread focus_thread;
+	std::atomic<bool> focus_running{false};
+	HANDLE focus_wake = nullptr; // manual signal: tells the thread to stop
 };
 
 remote_state g_remote;
@@ -259,10 +275,13 @@ std::string state_json()
 	// touchpad UI and the settings mirror (server-localized labels) agree.
 	const char *locale = nyan_locale();
 	const bool ja = locale && strncmp(locale, "ja", 2) == 0;
-	char json[80];
+	// edit: the host's focused control is a typable field (UIA focus watch),
+	// so the phone lights its keyboard button without auto-opening anything.
+	const bool edit = g_remote.edit_focused.load(std::memory_order_relaxed);
+	char json[96];
 	snprintf(json, sizeof(json),
-		 "{\"t\":\"state\",\"dist\":%.3f,\"lang\":\"%s\"}",
-		 effective_distance(), ja ? "ja" : "en");
+		 "{\"t\":\"state\",\"dist\":%.3f,\"lang\":\"%s\",\"edit\":%s}",
+		 effective_distance(), ja ? "ja" : "en", edit ? "true" : "false");
 	return json;
 }
 
@@ -387,6 +406,130 @@ void inject_wheel(double notches)
 	SendInput(1, &in, sizeof(in));
 }
 
+// Puts Unicode text on the clipboard (CF_UNICODETEXT). Returns false if the
+// clipboard could not be opened or the allocation failed.
+bool set_clipboard_text(const std::wstring &w)
+{
+	if (!OpenClipboard(nullptr))
+		return false;
+	bool ok = false;
+	const size_t bytes = (w.size() + 1) * sizeof(wchar_t);
+	if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+		if (void *p = GlobalLock(h)) {
+			memcpy(p, w.c_str(), bytes);
+			GlobalUnlock(h);
+			EmptyClipboard();
+			if (SetClipboardData(CF_UNICODETEXT, h))
+				ok = true; // clipboard now owns h
+			else
+				GlobalFree(h);
+		} else {
+			GlobalFree(h);
+		}
+	}
+	CloseClipboard();
+	return ok;
+}
+
+// Types a committed string at the host's focused control via the clipboard +
+// Ctrl-V, NOT synthesized keystrokes. KEYEVENTF_UNICODE characters get captured
+// by an active host IME - a Japanese IME in kana mode tries to *convert* the
+// injected hiragana, garbling the text. A paste inserts the literal characters
+// whatever the IME state, and works across native, browser and Electron
+// (Chromium) fields alike. The phone's own IME is the only one composing. The
+// previous clipboard text is restored shortly after the paste reads it.
+void inject_text(const std::string &utf8)
+{
+	if (utf8.empty())
+		return;
+	// Bound a garbage/oversized message; a real edit is well under this.
+	const std::string s = utf8.size() > 4096 ? utf8.substr(0, 4096) : utf8;
+	int wlen = MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
+				       static_cast<int>(s.size()), nullptr, 0);
+	if (wlen <= 0)
+		return;
+	std::wstring w(static_cast<size_t>(wlen), L'\0');
+	MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()),
+			    &w[0], wlen);
+
+	// Save the current clipboard text (best effort - non-text contents like
+	// an image cannot be preserved and are lost).
+	std::wstring prev;
+	bool had_prev = false;
+	if (OpenClipboard(nullptr)) {
+		if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+			if (const wchar_t *p =
+				    static_cast<const wchar_t *>(GlobalLock(h))) {
+				prev = p;
+				had_prev = true;
+				GlobalUnlock(h);
+			}
+		}
+		CloseClipboard();
+	}
+
+	if (!set_clipboard_text(w))
+		return;
+
+	INPUT in[4] = {};
+	in[0].type = INPUT_KEYBOARD;
+	in[0].ki.wVk = VK_CONTROL;
+	in[1].type = INPUT_KEYBOARD;
+	in[1].ki.wVk = 'V';
+	in[2] = in[1];
+	in[2].ki.dwFlags = KEYEVENTF_KEYUP;
+	in[3] = in[0];
+	in[3].ki.dwFlags = KEYEVENTF_KEYUP;
+	SendInput(4, in, sizeof(INPUT));
+
+	// Restore the old clipboard once the target has had time to read the
+	// paste (WM_PASTE is processed on the target's queue, async to us).
+	if (had_prev) {
+		std::thread([prev]() {
+			Sleep(400);
+			set_clipboard_text(prev);
+		}).detach();
+	}
+}
+
+// Editing/navigation keys the phone can send by name (the touchpad already
+// covers clicks). Whitelisted so an unknown key string is a no-op rather than
+// an arbitrary VK. The extended flag matters for the navigation cluster: some
+// apps distinguish the real arrows/Home/End/Delete from their numpad twins.
+struct vkey_entry {
+	const char *name;
+	WORD vk;
+	bool ext;
+};
+constexpr vkey_entry VKEYS[] = {
+	{"enter", VK_RETURN, false}, {"backspace", VK_BACK, false},
+	{"tab", VK_TAB, false},      {"esc", VK_ESCAPE, false},
+	{"del", VK_DELETE, true},    {"up", VK_UP, true},
+	{"down", VK_DOWN, true},     {"left", VK_LEFT, true},
+	{"right", VK_RIGHT, true},   {"home", VK_HOME, true},
+	{"end", VK_END, true},
+};
+
+void inject_vkey(const std::string &name)
+{
+	const vkey_entry *e = nullptr;
+	for (const auto &v : VKEYS) {
+		if (name == v.name) {
+			e = &v;
+			break;
+		}
+	}
+	if (!e)
+		return;
+	INPUT in[2] = {};
+	in[0].type = INPUT_KEYBOARD;
+	in[0].ki.wVk = e->vk;
+	in[0].ki.dwFlags = e->ext ? KEYEVENTF_EXTENDEDKEY : 0;
+	in[1] = in[0];
+	in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
+	SendInput(2, in, sizeof(INPUT));
+}
+
 void handle_message(uint64_t conn, const nyan_json &msg)
 {
 	// Every message is a liveness proof, including the page's bare
@@ -408,6 +551,13 @@ void handle_message(uint64_t conn, const nyan_json &msg)
 			      nyan_json_get_bool(msg, "d"));
 	} else if (type == "whl") {
 		inject_wheel(nyan_json_get_double(msg, "n"));
+	} else if (type == "text") {
+		// Phone keyboard: a confirmed string typed at the host's focused
+		// control (the user clicks the target field via the touchpad first).
+		inject_text(nyan_json_get_string(msg, "s"));
+	} else if (type == "key") {
+		// Editing/navigation key by name (enter, backspace, arrows, ...).
+		inject_vkey(nyan_json_get_string(msg, "k"));
 	} else if (type == "dist") {
 		// Gaze dolly: walk toward/away from the looked-at point, so
 		// the zoom centers on it instead of the screen center.
@@ -415,16 +565,202 @@ void handle_message(uint64_t conn, const nyan_json &msg)
 			&g_device,
 			clampd(nyan_json_get_double(msg, "s"), -100.0, 100.0));
 		broadcast_state();
+	} else if (type == "focus") {
+		// Wall focus picker: 0 = whole wall, else the chosen display's
+		// Windows number. manager_set_focus_display clamps and bumps the
+		// wall rebuild generation.
+		manager_set_focus_display(
+			&g_device, static_cast<int>(nyan_json_get_int(msg, "n")));
 	} else if (type == "recenter") {
 		manager_recenter(&g_device);
-	} else if (type == "recal") {
-		manager_recalibrate(&g_device);
+	} else if (type == "pose") {
+		// 3DoF toggle on the main page: head-pose follow on/off (does not
+		// touch the device connection). Recalibrate moved into the
+		// settings mirror, routed through the schema's "set" path.
+		g_device.pose_follow.store(nyan_json_get_bool(msg, "v"),
+					   std::memory_order_relaxed);
 	} else if (type == "set") {
 		// Settings mirror: routed through the remote_schema table
 		// (whitelist + clamp). The confirmed state comes back via the
 		// poll's cfg push; the page renders optimistically meanwhile.
 		remote_schema_apply(msg);
 	}
+}
+
+// Whether a TextPattern element's content is read-only (a text view rather than
+// an editor). Reads the IsReadOnly text attribute over the whole document range;
+// a "mixed" value (vt != VT_BOOL) or a failed query is treated as editable, so
+// we err toward offering input rather than withholding it on an odd app.
+bool text_is_read_only(IUIAutomationElement *e)
+{
+	bool ro = false;
+	IUIAutomationTextPattern *tp = nullptr;
+	if (SUCCEEDED(e->GetCurrentPatternAs(
+		    UIA_TextPatternId, __uuidof(IUIAutomationTextPattern),
+		    reinterpret_cast<void **>(&tp))) &&
+	    tp) {
+		IUIAutomationTextRange *range = nullptr;
+		if (SUCCEEDED(tp->get_DocumentRange(&range)) && range) {
+			VARIANT v;
+			VariantInit(&v);
+			if (SUCCEEDED(range->GetAttributeValue(
+				    UIA_IsReadOnlyAttributeId, &v)) &&
+			    v.vt == VT_BOOL)
+				ro = (v.boolVal == VARIANT_TRUE);
+			VariantClear(&v);
+			range->Release();
+		}
+		tp->Release();
+	}
+	return ro;
+}
+
+// True when a focused UIA element is something the user can type into:
+//   1) a non-read-only ValuePattern (input / textarea / native Edit), or
+//   2) a keyboard-focusable element exposing a TextPattern whose content is not
+//      read-only - this catches contenteditable rich editors that come through
+//      as Group/Custom with no ValuePattern (e.g. Electron apps like Claude
+//      Desktop, which report ControlType Group + TextPattern).
+// A read-only text view (TextPattern but IsReadOnly) is excluded so the hint
+// never fires where typing has nowhere to land. Focus-driven, so static labels
+// (which do not take keyboard focus) never reach here.
+bool element_is_editable(IUIAutomationElement *e)
+{
+	if (!e)
+		return false;
+
+	IUIAutomationValuePattern *vp = nullptr;
+	if (SUCCEEDED(e->GetCurrentPatternAs(
+		    UIA_ValuePatternId, __uuidof(IUIAutomationValuePattern),
+		    reinterpret_cast<void **>(&vp))) &&
+	    vp) {
+		BOOL ro = FALSE;
+		vp->get_CurrentIsReadOnly(&ro);
+		vp->Release();
+		return !ro;
+	}
+
+	BOOL kbd = FALSE;
+	e->get_CurrentIsKeyboardFocusable(&kbd);
+	IUnknown *tp = nullptr;
+	const bool has_text =
+		SUCCEEDED(e->GetCurrentPattern(UIA_TextPatternId, &tp)) && tp;
+	if (tp)
+		tp->Release();
+	if (kbd && has_text)
+		return !text_is_read_only(e);
+
+	CONTROLTYPEID ct = 0;
+	e->get_CurrentControlType(&ct);
+	return ct == UIA_EditControlTypeId || ct == UIA_DocumentControlTypeId;
+}
+
+// Recompute the edit-focused flag from the newly focused element and push a
+// fresh state to the phones only when it flips, so a focus change inside the
+// same field (or between two text fields) costs no traffic. Runs on a UIA
+// worker thread; broadcast_state's reads are all atomic/mutex-guarded.
+void update_edit_state(IUIAutomationElement *sender)
+{
+	const bool editable = element_is_editable(sender);
+	if (g_remote.edit_focused.exchange(editable,
+					   std::memory_order_relaxed) != editable)
+		broadcast_state();
+}
+
+// COM sink for UIA focus-changed events. Single-purpose: every focus change in
+// any app calls HandleFocusChangedEvent with the now-focused element.
+class FocusHandler : public IUIAutomationFocusChangedEventHandler {
+	LONG ref_ = 1;
+
+public:
+	ULONG STDMETHODCALLTYPE AddRef() override
+	{
+		return InterlockedIncrement(&ref_);
+	}
+	ULONG STDMETHODCALLTYPE Release() override
+	{
+		const LONG r = InterlockedDecrement(&ref_);
+		if (r == 0)
+			delete this;
+		return r;
+	}
+	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid,
+						 void **ppv) override
+	{
+		if (riid == __uuidof(IUnknown) ||
+		    riid == __uuidof(IUIAutomationFocusChangedEventHandler)) {
+			*ppv = static_cast<IUIAutomationFocusChangedEventHandler *>(
+				this);
+			AddRef();
+			return S_OK;
+		}
+		*ppv = nullptr;
+		return E_NOINTERFACE;
+	}
+	HRESULT STDMETHODCALLTYPE
+	HandleFocusChangedEvent(IUIAutomationElement *sender) override
+	{
+		update_edit_state(sender);
+		return S_OK;
+	}
+};
+
+// Lives on its own MTA thread: UIA delivers events on its internal pool, but
+// the COM object and apartment must outlive the registration, so the thread
+// holds them and parks on focus_wake until asked to stop.
+void focus_watch_thread_proc()
+{
+	const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+	IUIAutomation *uia = nullptr;
+	FocusHandler *handler = nullptr;
+	if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr,
+				       CLSCTX_INPROC_SERVER,
+				       __uuidof(IUIAutomation),
+				       reinterpret_cast<void **>(&uia))) &&
+	    uia) {
+		handler = new FocusHandler();
+		if (FAILED(uia->AddFocusChangedEventHandler(nullptr, handler))) {
+			handler->Release();
+			handler = nullptr;
+		}
+	}
+	WaitForSingleObject(g_remote.focus_wake, INFINITE);
+	if (uia) {
+		if (handler) {
+			uia->RemoveFocusChangedEventHandler(handler);
+			handler->Release();
+		}
+		uia->Release();
+	}
+	// A field may have been focused when we stop; clear the hint so it does
+	// not stick on the phone after the watcher is gone.
+	if (g_remote.edit_focused.exchange(false, std::memory_order_relaxed))
+		broadcast_state();
+	if (SUCCEEDED(co))
+		CoUninitialize();
+}
+
+void focus_watch_start()
+{
+	if (g_remote.focus_running.load(std::memory_order_relaxed))
+		return;
+	g_remote.focus_wake = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+	if (!g_remote.focus_wake)
+		return;
+	g_remote.focus_running.store(true, std::memory_order_relaxed);
+	g_remote.focus_thread = std::thread(focus_watch_thread_proc);
+}
+
+void focus_watch_stop()
+{
+	if (!g_remote.focus_running.load(std::memory_order_relaxed))
+		return;
+	SetEvent(g_remote.focus_wake);
+	if (g_remote.focus_thread.joinable())
+		g_remote.focus_thread.join();
+	CloseHandle(g_remote.focus_wake);
+	g_remote.focus_wake = nullptr;
+	g_remote.focus_running.store(false, std::memory_order_relaxed);
 }
 
 void start_server(uint16_t port, const std::string &token)
@@ -487,9 +823,15 @@ void start_server(uint16_t port, const std::string &token)
 
 void remote_control_sync()
 {
+	// The remote follows both its own toggle and the master enable: when the
+	// app is disabled (master off = fully idle) the LAN port closes too, for
+	// the same "glasses/host freed" reason the other subsystems stop. OBS forces
+	// connect_enabled true, so its remote is governed by remote_enabled alone.
 	const bool want =
-		g_device.remote_enabled.load(std::memory_order_relaxed);
+		g_device.remote_enabled.load(std::memory_order_relaxed) &&
+		g_device.connect_enabled.load(std::memory_order_relaxed);
 	if (!want) {
+		focus_watch_stop();
 		if (g_remote.server.running()) {
 			g_remote.server.stop();
 			release_held_buttons();
@@ -506,6 +848,7 @@ void remote_control_sync()
 	// Fail secure: without a real token the upgrade gate would accept any
 	// client, so refuse to run rather than expose the command channel.
 	if (token.empty()) {
+		focus_watch_stop();
 		if (g_remote.server.running()) {
 			g_remote.server.stop();
 			release_held_buttons();
@@ -549,6 +892,13 @@ void remote_control_sync()
 	    1e-4f)
 		broadcast_state();
 
+	// Watch the host's keyboard focus only while a phone is connected, so an
+	// idle remote leaves other apps' accessibility untouched.
+	if (remote_control_client_count() > 0)
+		focus_watch_start();
+	else
+		focus_watch_stop();
+
 	// Settings mirror: rebuild the snapshot while someone is connected
 	// and push it when anything (dock edits, device state) changed.
 	if (remote_control_client_count() > 0) {
@@ -584,6 +934,7 @@ void remote_control_rotate_token()
 
 void remote_control_shutdown()
 {
+	focus_watch_stop();
 	g_remote.server.stop();
 	release_held_buttons();
 	std::lock_guard<std::mutex> lk(g_remote.conns_mutex);

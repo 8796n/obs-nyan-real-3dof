@@ -293,8 +293,24 @@ std::vector<display_config_entry> get_active_display_config_entries()
 			       &mode_count, modes.data(), nullptr) != ERROR_SUCCESS)
 		return {};
 
+	// The number Windows shows in Display Settings ("Identify") is assigned
+	// contiguously 1..N, but no single field matches it: the QueryDisplayConfig
+	// path order (used originally) is unrelated, the GDI device number
+	// ("\\.\DISPLAYN") keeps gaps from once-attached displays (e.g. 1/2/5/6),
+	// and the source id is per-adapter (collides across GPUs, and on the boot
+	// GPU it can even run opposite to Settings). Empirically Settings orders the
+	// active paths by (adapter, target id) - adapters by LUID (boot GPU first),
+	// each adapter's outputs by target id - and numbers them in that order. We
+	// reproduce that: collect a sort key per path, then rank below.
+	struct path_key {
+		LONG adapter_high;
+		ULONG adapter_low;
+		UINT32 target_id;
+	};
+	std::vector<path_key> keys;
 	std::vector<display_config_entry> entries;
 	entries.reserve(path_count);
+	keys.reserve(path_count);
 	for (UINT32 i = 0; i < path_count; ++i) {
 		const DISPLAYCONFIG_PATH_INFO &path = paths[i];
 		DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
@@ -307,7 +323,6 @@ std::vector<display_config_entry> get_active_display_config_entries()
 
 		display_config_entry entry;
 		entry.gdi_device = wide_to_utf8(source.viewGdiDeviceName);
-		entry.windows_number = static_cast<int>(i + 1);
 
 		DISPLAYCONFIG_TARGET_DEVICE_NAME target = {};
 		target.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
@@ -323,9 +338,29 @@ std::vector<display_config_entry> get_active_display_config_entries()
 			}
 		}
 
-		if (!entry.gdi_device.empty())
+		if (!entry.gdi_device.empty()) {
+			keys.push_back({path.sourceInfo.adapterId.HighPart,
+					path.sourceInfo.adapterId.LowPart,
+					path.targetInfo.id});
 			entries.push_back(std::move(entry));
+		}
 	}
+
+	// Rank by (adapter LUID, target id) and number 1..N - the order Settings
+	// shows. order[r] = index of the entry that gets display number r+1.
+	std::vector<size_t> order(entries.size());
+	for (size_t i = 0; i < order.size(); ++i)
+		order[i] = i;
+	std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+		if (keys[a].adapter_high != keys[b].adapter_high)
+			return keys[a].adapter_high < keys[b].adapter_high;
+		if (keys[a].adapter_low != keys[b].adapter_low)
+			return keys[a].adapter_low < keys[b].adapter_low;
+		return keys[a].target_id < keys[b].target_id;
+	});
+	for (size_t r = 0; r < order.size(); ++r)
+		entries[order[r]].windows_number = static_cast<int>(r) + 1;
+
 	return entries;
 }
 
@@ -412,6 +447,18 @@ std::vector<monitor_entry> filter_monitors(const std::vector<monitor_entry> &all
 	}
 
 	return selected;
+}
+
+std::vector<monitor_entry> focus_monitor(const std::vector<monitor_entry> &monitors,
+					 int windows_number)
+{
+	if (windows_number <= 0)
+		return monitors;
+	for (const monitor_entry &monitor : monitors) {
+		if (monitor.windows_number == windows_number)
+			return {monitor};
+	}
+	return monitors; // focused display absent: keep the whole wall
 }
 
 std::vector<std::vector<monitor_entry>>

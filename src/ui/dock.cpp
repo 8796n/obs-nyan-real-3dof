@@ -46,9 +46,12 @@
 #include "cursor_fence.h"
 #include "device_manager.h"
 #include "device_registry.h"
+#include "endpoint_volume.h" // output-device volume/mute (shared Win32)
 #include "monitor_enum.h"
 #include "nyan_host.h"
 #include "nyan_log.h"
+#include "nyan_section.h" // shared collapsible DockSection (also used standalone)
+#include "nyan_toggle.h"  // modern ToggleSwitch + add_switch_row (also standalone)
 #include "qrcodegen.hpp"
 #include "remote_control.h"
 #include "tooltip_util.h"
@@ -277,19 +280,50 @@ protected:
 	void wheelEvent(QWheelEvent *event) override { event->ignore(); }
 };
 
-// Full-width clickable band for a section header. Plain QFrame so the QSS
-// background applies; the click callback avoids Q_OBJECT/moc.
-class DockSectionHeader final : public QFrame {
+// Same reason for the value sliders: scrolling the dock should not nudge FOV /
+// distance / IPD etc. The wheel still scrolls the dock (event is ignored, so it
+// bubbles to the scroll area).
+class NoWheelSlider final : public QSlider {
 public:
-	std::function<void()> on_click;
+	using QSlider::QSlider;
 
 protected:
-	void mousePressEvent(QMouseEvent *event) override
+	void wheelEvent(QWheelEvent *event) override { event->ignore(); }
+};
+
+// Focus-mode picker: "none (whole wall)" + each non-glasses display. The wall
+// displays change at runtime, so the list is rebuilt right before the popup
+// opens. Item data is the Windows number (0 = off); the value is read from /
+// written to g_device.focus_display.
+class FocusComboBox final : public QComboBox {
+public:
+	using QComboBox::QComboBox;
+	void showPopup() override
 	{
-		if (event->button() == Qt::LeftButton && on_click)
-			on_click();
-		QFrame::mousePressEvent(event);
+		repopulate();
+		QComboBox::showPopup();
 	}
+	void repopulate()
+	{
+		const int cur =
+			g_device.focus_display.load(std::memory_order_relaxed);
+		QSignalBlocker block(this);
+		clear();
+		addItem(nyan_text("dock.focus_off"), 0);
+		int sel = 0;
+		for (const monitor_entry &m : filter_monitors(
+			     enumerate_monitors(), /*include_primary=*/true,
+			     /*exclude_glasses=*/true, "", "")) {
+			addItem(QString::fromStdString(m.label),
+				m.windows_number);
+			if (m.windows_number == cur)
+				sel = count() - 1;
+		}
+		setCurrentIndex(sel);
+	}
+
+protected:
+	void wheelEvent(QWheelEvent *event) override { event->ignore(); }
 };
 
 // QLabel with a left-click callback (the remote's QR code rotates its token
@@ -308,92 +342,6 @@ protected:
 	}
 };
 
-// Collapsible dock section: a full-width header band (arrow + bold title +
-// optional collapsed-state summary) above a body widget. The gray-overlay
-// band reads as a section divider on dark and light themes alike.
-class DockSection final : public QWidget {
-public:
-	std::function<void(bool open)> on_toggled; // user clicks only
-
-	DockSection(const QString &title, QWidget *body,
-		    QWidget *parent = nullptr)
-		: QWidget(parent),
-		  body_(body)
-	{
-		auto *lay = new QVBoxLayout(this);
-		lay->setContentsMargins(0, 0, 0, 0);
-		lay->setSpacing(2);
-		header_ = new DockSectionHeader();
-		header_->setObjectName("nyanDockSectionHeader");
-		header_->setStyleSheet(
-			"#nyanDockSectionHeader {"
-			" background-color: rgba(128,128,128,0.16);"
-			" border-radius: 4px; }"
-			"#nyanDockSectionHeader:hover {"
-			" background-color: rgba(128,128,128,0.28); }");
-		header_->setCursor(Qt::PointingHandCursor);
-		auto *hl = new QHBoxLayout(header_);
-		hl->setContentsMargins(8, 4, 8, 4);
-		hl->setSpacing(6);
-		arrow_ = new QLabel(header_);
-		title_ = new QLabel(title, header_);
-		QFont title_font = title_->font();
-		title_font.setBold(true);
-		title_->setFont(title_font);
-		summary_ = new QLabel(header_);
-		summary_->setVisible(false);
-		// Arrow pinned to the left edge; the title (+ collapsed
-		// summary) sits in the true center of the band thanks to a
-		// phantom spacer of the arrow's width on the right.
-		arrow_->setText(QStringLiteral("▾"));
-		int arrow_w = arrow_->sizeHint().width();
-		arrow_->setText(QStringLiteral("▸"));
-		arrow_w = std::max(arrow_w, arrow_->sizeHint().width());
-		arrow_->setFixedWidth(arrow_w);
-		auto *balance = new QLabel(header_);
-		balance->setFixedWidth(arrow_w);
-		hl->addWidget(arrow_);
-		hl->addStretch(1);
-		hl->addWidget(title_);
-		hl->addWidget(summary_);
-		hl->addStretch(1);
-		hl->addWidget(balance);
-		lay->addWidget(header_);
-		lay->addWidget(body_);
-		header_->on_click = [this]() { set_open(!open_, true); };
-		set_open(true, false);
-	}
-
-	// Programmatic open/close (settings load): no callback, so the
-	// persistence binding does not echo the value back.
-	void set_expanded(bool open) { set_open(open, false); }
-
-	void set_summary(const QString &text, const QString &tooltip)
-	{
-		summary_->setText(text);
-		summary_->setToolTip(tooltip);
-		summary_->setVisible(!open_ && !text.isEmpty());
-	}
-
-private:
-	void set_open(bool open, bool notify)
-	{
-		open_ = open;
-		arrow_->setText(open ? QStringLiteral("▾")
-				     : QStringLiteral("▸"));
-		body_->setVisible(open);
-		summary_->setVisible(!open && !summary_->text().isEmpty());
-		if (notify && on_toggled)
-			on_toggled(open);
-	}
-
-	DockSectionHeader *header_ = nullptr;
-	QLabel *arrow_ = nullptr;
-	QLabel *title_ = nullptr;
-	QLabel *summary_ = nullptr;
-	QWidget *body_ = nullptr;
-	bool open_ = true;
-};
 
 class NyanRealDock final : public QScrollArea {
 public:
@@ -410,22 +358,13 @@ public:
 		root->setContentsMargins(10, 10, 10, 10);
 		root->setSpacing(8);
 
-		// Pose-follow toggle, drawn with OBS's source-visibility eye
-		// icon (theme class "indicator-visibility"). OFF freezes the
-		// warp and closes the device connection.
-		connect_box = new QCheckBox(content);
-		connect_box->setProperty("class",
-					 "checkbox-icon indicator-visibility");
-		connect_box->setToolTip(
-			tip("dock.pose_follow_tooltip"));
+		// Top action row: just Center. The pose-follow (3DoF) toggle and
+		// Recalibrate moved into the virtual-screen section below - the eye
+		// icon here was unlabelled and unclear.
 		auto *action_row_1 = new QHBoxLayout();
-		auto *recenter = new QPushButton(nyan_text("recenter"), content);
-		auto *recalibrate = new QPushButton(nyan_text("recalibrate"), content);
+		recenter = new QPushButton(nyan_text("recenter"), content);
 		recenter->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-		recalibrate->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-		action_row_1->addWidget(connect_box);
 		action_row_1->addWidget(recenter);
-		action_row_1->addWidget(recalibrate);
 		root->addLayout(action_row_1);
 
 
@@ -444,8 +383,14 @@ public:
 		status_form->addRow(nyan_text("dock.transport"), transport_label);
 		status_form->addRow(nyan_text("dock.stream"), stream_label);
 		status_form->addRow(nyan_text("dock.pose"), pose_label);
-		status_form->addRow(nyan_text("dock.virtual_sources"),
-				    virtual_label);
+		// "Virtual sources" counts OBS sources; the standalone has none, so
+		// the host hides this row (nyan_caps). The label still exists for the
+		// refresh path; it just stays out of the layout.
+		if (nyan_caps().virtual_sources)
+			status_form->addRow(nyan_text("dock.virtual_sources"),
+					    virtual_label);
+		else
+			virtual_label->setVisible(false);
 		status_section = new DockSection(nyan_text("dock.status"),
 						 status_body, content);
 		root->addWidget(status_section);
@@ -466,16 +411,16 @@ public:
 			tip("brightness_tooltip"));
 		device_form->addRow(nyan_text("brightness"),
 				    brightness_row);
-		autobright_box = new QCheckBox(nyan_text("autobright"),
-					       device_body);
+		autobright_box = new ToggleSwitch(device_body);
 		autobright_box->setToolTip(
 			tip("autobright_tooltip"));
-		device_form->addRow(autobright_box);
-		convergence_box = new QCheckBox(
-			nyan_text("convergence_link"), device_body);
+		autobright_row = add_switch_row(device_form, nyan_text("autobright"),
+						autobright_box);
+		convergence_box = new ToggleSwitch(device_body);
 		convergence_box->setToolTip(
 			tip("convergence_link_tooltip"));
-		device_form->addRow(convergence_box);
+		convergence_row = add_switch_row(
+			device_form, nyan_text("convergence_link"), convergence_box);
 		display_mode_combo = new NoWheelComboBox(device_body);
 		display_mode_combo->setToolTip(
 			tip("displaymode_tooltip"));
@@ -497,12 +442,20 @@ public:
 			nyan_text("dock.open_projector"), output_body);
 		projector_button->setToolTip(
 			tip("dock.open_projector_tooltip"));
-		output_form->addRow(projector_button);
-		auto_projector_box = new QCheckBox(
-			nyan_text("dock.auto_projector"), output_body);
+		auto_projector_box = new ToggleSwitch(output_body);
 		auto_projector_box->setToolTip(
 			tip("dock.auto_projector_tooltip"));
-		output_form->addRow(auto_projector_box);
+		// The glasses projector is an OBS notion; the standalone opens its own
+		// fullscreen window automatically, so the host hides both controls
+		// (nyan_caps). They stay alive for the refresh/connect paths.
+		if (nyan_caps().projector) {
+			output_form->addRow(projector_button);
+			add_switch_row(output_form, nyan_text("dock.auto_projector"),
+				       auto_projector_box);
+		} else {
+			projector_button->setVisible(false);
+			auto_projector_box->setVisible(false);
+		}
 		sbs_combo = new NoWheelComboBox(output_body);
 		sbs_combo->addItem(nyan_text("sbs_output.auto"), 0);
 		sbs_combo->addItem(nyan_text("sbs_output.on"), 1);
@@ -514,11 +467,24 @@ public:
 			tip("dock.monitor_out_tooltip"));
 		output_form->addRow(nyan_text("dock.monitor_out"),
 				    monitor_combo);
-		cursor_fence_box = new QCheckBox(
-			nyan_text("dock.cursor_fence"), output_body);
+		// Volume + mute of the chosen output device (its WASAPI endpoint
+		// master). The glasses are usually not the Windows default, so the
+		// taskbar slider cannot reach them; this controls them directly.
+		volume_row = new QWidget(output_body);
+		auto *volume_layout = new QHBoxLayout(volume_row);
+		volume_layout->setContentsMargins(0, 0, 0, 0);
+		volume_layout->setSpacing(6);
+		volume_slider = new NoWheelSlider(Qt::Horizontal, volume_row);
+		volume_slider->setRange(0, 100);
+		mute_box = new ToggleSwitch(nyan_text("dock.mute"), volume_row);
+		volume_layout->addWidget(volume_slider, 1);
+		volume_layout->addWidget(mute_box);
+		output_form->addRow(nyan_text("dock.volume"), volume_row);
+		cursor_fence_box = new ToggleSwitch(output_body);
 		cursor_fence_box->setToolTip(
 			tip("dock.cursor_fence_tooltip"));
-		output_form->addRow(cursor_fence_box);
+		add_switch_row(output_form, nyan_text("dock.cursor_fence"),
+			       cursor_fence_box);
 		output_section = new DockSection(nyan_text("dock.output"),
 						 output_body, content);
 		root->addWidget(output_section);
@@ -530,7 +496,7 @@ public:
 		prediction_spin->setRange(0.0, 50.0);
 		prediction_spin->setDecimals(0);
 		prediction_spin->setSingleStep(1.0);
-		fov_auto_box = new QCheckBox(nyan_text("fov_auto"), screen_body);
+		fov_auto_box = new ToggleSwitch(screen_body);
 		fov_spin = new NoWheelDoubleSpinBox(screen_body);
 		fov_spin->setRange(20.0, 100.0);
 		fov_spin->setDecimals(0);
@@ -553,34 +519,52 @@ public:
 		ipd_spin->setDecimals(1);
 		ipd_spin->setSingleStep(0.5);
 		screen_label = new QLabel(screen_body);
-		screen_form->addRow(nyan_text("prediction_ms"),
-				    make_double_slider(screen_body, prediction_spin,
-						       &prediction_slider,
-						       PREDICTION_SLIDER_SCALE));
-		screen_form->addRow(fov_auto_box);
-		screen_form->addRow(nyan_text("fov_deg"),
-				    make_double_slider(screen_body, fov_spin, &fov_slider,
-						       FOV_SLIDER_SCALE));
+		// Build the rows, then add them in everyday-first order (rarely-changed
+		// FOV / prediction / IPD sink to the bottom).
+		auto *prediction_row =
+			make_double_slider(screen_body, prediction_spin,
+					   &prediction_slider, PREDICTION_SLIDER_SCALE);
+		auto *fov_row = make_double_slider(screen_body, fov_spin, &fov_slider,
+						   FOV_SLIDER_SCALE);
 		distance_row = make_double_slider(screen_body, distance_spin,
 						  &distance_slider,
 						  DISTANCE_SLIDER_SCALE);
-		// The base text; refresh() appends the detected model's
-		// optical focal distance as SBS comfort guidance.
-		distance_row->setToolTip(
-			tip("screen_distance_tooltip"));
-		screen_form->addRow(nyan_text("screen_distance_m"),
-				    distance_row);
-		screen_form->addRow(nyan_text("screen_size_factor"),
-				    make_double_slider(screen_body, size_spin, &size_slider,
-						       SIZE_SLIDER_SCALE));
-		screen_form->addRow(nyan_text("screen_curve"),
-				    make_double_slider(screen_body, curve_spin, &curve_slider,
-						       CURVE_SLIDER_SCALE));
-		auto *ipd_row = make_double_slider(screen_body, ipd_spin,
-						   &ipd_slider, IPD_SLIDER_SCALE);
+		// The base text; refresh() appends the detected model's optical focal
+		// distance as SBS comfort guidance.
+		distance_row->setToolTip(tip("screen_distance_tooltip"));
+		auto *size_row = make_double_slider(screen_body, size_spin, &size_slider,
+						    SIZE_SLIDER_SCALE);
+		auto *curve_row = make_double_slider(screen_body, curve_spin,
+						     &curve_slider, CURVE_SLIDER_SCALE);
+		auto *ipd_row = make_double_slider(screen_body, ipd_spin, &ipd_slider,
+						   IPD_SLIDER_SCALE);
 		ipd_row->setToolTip(tip("ipd_tooltip"));
+		focus_combo = new FocusComboBox(screen_body);
+		focus_combo->setToolTip(tip("dock.focus_tooltip"));
+		focus_combo->repopulate();
+		// Pose-follow (3DoF) toggle: was an unlabelled eye icon in the top
+		// action row; now a labelled switch right under the focus picker.
+		connect_box = new ToggleSwitch(screen_body);
+		connect_box->setToolTip(tip("dock.pose_follow_tooltip"));
+		offscreen_box = new ToggleSwitch(screen_body);
+		offscreen_box->setToolTip(tip("dock.offscreen_indicator_tooltip"));
+		recalibrate =
+			new QPushButton(nyan_text("recalibrate"), screen_body);
+
+		screen_form->addRow(nyan_text("screen_distance_m"), distance_row);
+		screen_form->addRow(nyan_text("screen_size_factor"), size_row);
+		screen_form->addRow(nyan_text("screen_curve"), curve_row);
+		screen_form->addRow(nyan_text("dock.focus"), focus_combo);
+		add_switch_row(screen_form, nyan_text("pose_follow"), connect_box);
+		add_switch_row(screen_form, nyan_text("dock.offscreen_indicator"),
+			       offscreen_box);
+		add_switch_row(screen_form, nyan_text("fov_auto"), fov_auto_box);
+		screen_form->addRow(nyan_text("fov_deg"), fov_row);
+		screen_form->addRow(nyan_text("prediction_ms"), prediction_row);
 		screen_form->addRow(nyan_text("ipd_mm"), ipd_row);
 		screen_form->addRow(nyan_text("dock.screen_result"), screen_label);
+		// Gyro-bias recalibration: rarely used, at the very bottom.
+		screen_form->addRow(recalibrate);
 		screen_section = new DockSection(nyan_text("dock.screen"),
 						 screen_body, content);
 		root->addWidget(screen_section);
@@ -591,11 +575,11 @@ public:
 		auto *remote_body = new QWidget(content);
 		auto *remote_form = new QFormLayout(remote_body);
 		remote_form->setContentsMargins(16, 0, 0, 4);
-		remote_enable_box = new QCheckBox(
-			nyan_text("dock.remote_enable"), remote_body);
+		remote_enable_box = new ToggleSwitch(remote_body);
 		remote_enable_box->setToolTip(
 			tip("dock.remote_enable_tooltip"));
-		remote_form->addRow(remote_enable_box);
+		add_switch_row(remote_form, nyan_text("dock.remote_enable"),
+			       remote_enable_box);
 		remote_port_spin = new NoWheelSpinBox(remote_body);
 		remote_port_spin->setRange(1024, 65535);
 		remote_form->addRow(nyan_text("dock.remote_port"),
@@ -633,14 +617,14 @@ public:
 		port_spin->setRange(1, 65535);
 		advanced_form->addRow(nyan_text("ip"), ip_edit);
 		advanced_form->addRow(nyan_text("port"), port_spin);
-		mag_yaw_box = new QCheckBox(nyan_text("mag_yaw"), advanced_body);
-		debug_box = new QCheckBox(nyan_text("debug_log"), advanced_body);
+		mag_yaw_box = new ToggleSwitch(advanced_body);
+		debug_box = new ToggleSwitch(advanced_body);
 		// Resets every dock setting; lives at the bottom of the
 		// advanced section, away from the everyday tracker buttons.
 		auto *reset_defaults = new QPushButton(
 			nyan_text("reset_defaults"), advanced_body);
-		advanced_form->addRow(mag_yaw_box);
-		advanced_form->addRow(debug_box);
+		add_switch_row(advanced_form, nyan_text("mag_yaw"), mag_yaw_box);
+		add_switch_row(advanced_form, nyan_text("debug_log"), debug_box);
 		advanced_form->addRow(reset_defaults);
 		advanced_section = new DockSection(
 			nyan_text("dock.advanced"), advanced_body, content);
@@ -667,8 +651,15 @@ public:
 		bind_section(remote_section, DOCK_SECTION_REMOTE);
 		bind_section(advanced_section, DOCK_SECTION_ADVANCED);
 
-		QObject::connect(connect_box, &QCheckBox::toggled, this,
-				 [](bool checked) { manager_set_connect_enabled(&g_device, checked); });
+		// The eye-icon toggles head-pose follow (3DoF). It no longer closes
+		// the IMU connection - the device stays connected and tracking, the
+		// view just freezes to a head-locked mirror while off.
+		QObject::connect(connect_box, &QAbstractButton::toggled, this,
+				 [](bool checked) {
+					 g_device.pose_follow.store(
+						 checked,
+						 std::memory_order_relaxed);
+				 });
 		QObject::connect(brightness_spin,
 				 static_cast<void (QDoubleSpinBox::*)(double)>(
 					 &QDoubleSpinBox::valueChanged),
@@ -678,17 +669,31 @@ public:
 							 std::lround(value)),
 						 std::memory_order_relaxed);
 				 });
-		QObject::connect(autobright_box, &QCheckBox::toggled, this,
+		QObject::connect(autobright_box, &QAbstractButton::toggled, this,
 				 [](bool checked) {
 					 g_device.autobright_request.store(
 						 checked ? 1 : 0,
 						 std::memory_order_relaxed);
 				 });
-		QObject::connect(convergence_box, &QCheckBox::toggled, this,
+		QObject::connect(convergence_box, &QAbstractButton::toggled, this,
 				 [](bool checked) {
 					 g_device.convergence_link.store(
 						 checked,
 						 std::memory_order_relaxed);
+				 });
+		QObject::connect(offscreen_box, &QAbstractButton::toggled, this,
+				 [](bool checked) {
+					 g_device.offscreen_indicator.store(
+						 checked,
+						 std::memory_order_relaxed);
+				 });
+		QObject::connect(focus_combo,
+				 QOverload<int>::of(&QComboBox::activated), this,
+				 [this](int index) {
+					 manager_set_focus_display(
+						 &g_device,
+						 focus_combo->itemData(index)
+							 .toInt());
 				 });
 		// activated fires only on user interaction, so the periodic
 		// refresh sync below cannot echo a request back to the device.
@@ -737,7 +742,7 @@ public:
 					 if (open_glasses_source_projector(true))
 						 auto_projector_opened = true;
 				 });
-		QObject::connect(auto_projector_box, &QCheckBox::toggled, this,
+		QObject::connect(auto_projector_box, &QAbstractButton::toggled, this,
 				 [](bool checked) {
 					 g_device.auto_projector.store(
 						 checked,
@@ -784,9 +789,25 @@ public:
 				monitor_device_applied = false;
 				refresh();
 			});
+		// Volume/mute act on the live output endpoint. valueChanged/toggled
+		// only fire from user input here - refresh_volume() blocks signals
+		// when it writes the actual device state back into the widgets.
+		QObject::connect(volume_slider, &QSlider::valueChanged, this,
+				 [this](int v) {
+					 const std::string id = current_output_id();
+					 if (!id.empty())
+						 endpoint_volume_set(id,
+								     v / 100.0f);
+				 });
+		QObject::connect(mute_box, &QAbstractButton::toggled, this,
+				 [this](bool on) {
+					 const std::string id = current_output_id();
+					 if (!id.empty())
+						 endpoint_volume_set_mute(id, on);
+				 });
 		// The fence itself rises/falls on the next poll tick, which
 		// also knows the current glasses-display rect.
-		QObject::connect(cursor_fence_box, &QCheckBox::toggled, this,
+		QObject::connect(cursor_fence_box, &QAbstractButton::toggled, this,
 				 [this](bool checked) {
 					 g_device.cursor_fence.store(
 						 checked,
@@ -804,7 +825,7 @@ public:
 					 g_device.prediction_ms.store(static_cast<float>(value),
 								      std::memory_order_relaxed);
 				 });
-		QObject::connect(fov_auto_box, &QCheckBox::toggled, this, [this](bool checked) {
+		QObject::connect(fov_auto_box, &QAbstractButton::toggled, this, [this](bool checked) {
 			g_device.fov_auto.store(checked, std::memory_order_relaxed);
 			set_double_enabled(fov_spin, fov_slider, !checked);
 			if (checked)
@@ -847,7 +868,7 @@ public:
 					 g_device.ipd_mm.store(static_cast<float>(value),
 							       std::memory_order_relaxed);
 				 });
-		QObject::connect(remote_enable_box, &QCheckBox::toggled, this,
+		QObject::connect(remote_enable_box, &QAbstractButton::toggled, this,
 				 [this](bool checked) {
 					 g_device.remote_enabled.store(
 						 checked,
@@ -878,9 +899,9 @@ public:
 					 remote_control_rotate_token();
 					 refresh();
 				 });
-		QObject::connect(mag_yaw_box, &QCheckBox::toggled, this,
+		QObject::connect(mag_yaw_box, &QAbstractButton::toggled, this,
 				 [](bool checked) { manager_set_mag_yaw(&g_device, checked); });
-		QObject::connect(debug_box, &QCheckBox::toggled, this, [](bool checked) {
+		QObject::connect(debug_box, &QAbstractButton::toggled, this, [](bool checked) {
 			g_device.debug_log.store(checked, std::memory_order_relaxed);
 		});
 
@@ -926,7 +947,7 @@ private:
 		layout->setContentsMargins(0, 0, 0, 0);
 		layout->setSpacing(6);
 
-		auto *slider = new QSlider(Qt::Horizontal, row);
+		auto *slider = new NoWheelSlider(Qt::Horizontal, row);
 		slider->setRange(slider_value(spin->minimum(), scale),
 				 slider_value(spin->maximum(), scale));
 		slider->setSingleStep(std::max(1, slider_value(spin->singleStep(), scale)));
@@ -1043,22 +1064,30 @@ private:
 						     profile_for(detected).name));
 		// Transport-specific rows (currently the One-family TCP endpoint)
 		// follow the detected device; nothing detected hides them all.
-		const imu_transport transport = profile_for(detected).transport;
+		const model_profile &prof = profile_for(detected);
+		const imu_transport transport = prof.transport;
 		transport_label->setText(
 			nyan_text(traits_for(transport).name_key));
-		if (static_cast<int>(transport) != last_transport) {
-			last_transport = static_cast<int>(transport);
+		// Recompute row visibility when the detected MODEL changes, not just
+		// the transport: feature support differs between models on the same
+		// transport (e.g. BT-40 has brightness + convergence, BT-30C has
+		// neither, both sensor_api), so a transport-only check would miss it.
+		if (detected != last_visibility_model) {
+			last_visibility_model = detected;
 			const transport_traits tr = traits_for(transport);
 			advanced_form->setRowVisible(ip_edit,
 						     tr.uses_network_endpoint);
 			advanced_form->setRowVisible(port_spin,
 						     tr.uses_network_endpoint);
+			// Brightness, auto-brightness and convergence are per-model
+			// (profile flags), not per-transport. BT-30C has manual
+			// brightness but no auto mode; BT-40 has all three.
 			device_form->setRowVisible(brightness_row,
-						   tr.display_brightness);
-			device_form->setRowVisible(autobright_box,
-						   tr.display_brightness);
-			device_form->setRowVisible(convergence_box,
-						   tr.display_brightness);
+						   prof.display_brightness);
+			device_form->setRowVisible(autobright_row,
+						   prof.display_autobright);
+			device_form->setRowVisible(convergence_row,
+						   prof.display_distance);
 			// Display-mode choices follow the detected family.
 			{
 				QSignalBlocker block(display_mode_combo);
@@ -1076,7 +1105,9 @@ private:
 			device_form->setRowVisible(eye_button, tr.eye_camera);
 			// The whole section disappears when the model has no
 			// hardware controls (or nothing is detected).
-			device_section->setVisible(tr.display_brightness ||
+			device_section->setVisible(prof.display_brightness ||
+						   prof.display_autobright ||
+						   prof.display_distance ||
 						   tr.display_mode_count > 0 ||
 						   tr.eye_camera);
 		}
@@ -1178,6 +1209,10 @@ private:
 					      : nyan_text("dock.pose.calibrating");
 		}
 		pose_label->setText(pose_status);
+		// Recenter / recalibrate need a live IMU; gray them out while the
+		// glasses are not connected (matches the "disconnected" pose state).
+		recenter->setEnabled(connected);
+		recalibrate->setEnabled(connected);
 		// Collapsed-status summary: green = tracking (calibrated),
 		// yellow = connecting/calibrating, red = no device or follow
 		// off. The tooltip carries the textual state so the color is
@@ -1225,8 +1260,13 @@ private:
 						       ? glasses.height
 						       : 0,
 					       std::memory_order_relaxed);
+		// The cursor fence is a system-wide LL mouse hook tied to the glasses
+		// display, so it must release when the app is disabled (master off =
+		// glasses freed for other use), not just when the box is unchecked.
 		cursor_fence_update(
-			g_device.cursor_fence.load(std::memory_order_relaxed),
+			g_device.cursor_fence.load(std::memory_order_relaxed) &&
+				g_device.connect_enabled.load(
+					std::memory_order_relaxed),
 			glasses_rect_valid, glasses.x, glasses.y,
 			glasses.x + static_cast<long>(glasses.width),
 			glasses.y + static_cast<long>(glasses.height));
@@ -1333,6 +1373,7 @@ private:
 			cursor_fence_box->setChecked(g_device.cursor_fence.load(
 				std::memory_order_relaxed));
 		}
+		refresh_volume();
 		if (!glasses_display_present) {
 			// Close the glasses output and re-arm the auto-open for
 			// the next connection (the host tears down the windows it
@@ -1353,8 +1394,10 @@ private:
 		}
 
 		{
+			// Eye-icon now reflects head-pose follow (3DoF), not connect.
 			QSignalBlocker block(connect_box);
-			connect_box->setChecked(enabled);
+			connect_box->setChecked(
+				g_device.pose_follow.load(std::memory_order_relaxed));
 		}
 		if (!ip_edit->hasFocus()) {
 			std::lock_guard<std::mutex> lk(g_device.settings_mutex);
@@ -1377,6 +1420,20 @@ private:
 		set_double_control(curve_spin, curve_slider, CURVE_SLIDER_SCALE,
 				   screen_curve);
 		set_double_control(ipd_spin, ipd_slider, IPD_SLIDER_SCALE, ipd);
+		{
+			QSignalBlocker block(offscreen_box);
+			offscreen_box->setChecked(g_device.offscreen_indicator.load(
+				std::memory_order_relaxed));
+		}
+		{
+			// Keep the shown focus in sync (remote/hotkey can change it);
+			// repopulate happens on popup, so just select the number here.
+			const int focus = g_device.focus_display.load(
+				std::memory_order_relaxed);
+			QSignalBlocker block(focus_combo);
+			int idx = focus_combo->findData(focus);
+			focus_combo->setCurrentIndex(idx >= 0 ? idx : 0);
+		}
 		{
 			QSignalBlocker block(mag_yaw_box);
 			mag_yaw_box->setChecked(g_device.mag_yaw.load(std::memory_order_relaxed));
@@ -1513,6 +1570,51 @@ private:
 	}
 
 	// Sync the monitoring-output combo with the present device list and
+	// The WASAPI endpoint id audio is currently routed to: the glasses (auto)
+	// or the user's pick. Empty for "keep" (OBS default = not ours to touch)
+	// or when the device is absent. The volume controls act on this id.
+	std::string current_output_id()
+	{
+		const int mode =
+			g_device.monitor_out.load(std::memory_order_relaxed);
+		if (mode == MONITOR_OUT_AUTO_GLASSES)
+			return find_glasses_monitoring_device().id;
+		if (mode == MONITOR_OUT_DEVICE) {
+			std::lock_guard<std::mutex> lk(g_device.settings_mutex);
+			return g_device.monitor_device_id;
+		}
+		return "";
+	}
+
+	// Reflect the live endpoint volume/mute into the widgets (poll). Disabled
+	// when there is no controllable endpoint; skips the slider while the user
+	// drags it so the poll cannot fight the gesture.
+	void refresh_volume()
+	{
+		if (!volume_slider || !mute_box)
+			return;
+		const std::string id = current_output_id();
+		const bool have = !id.empty();
+		volume_slider->setEnabled(have);
+		mute_box->setEnabled(have);
+		if (!have)
+			return;
+		if (!volume_slider->isSliderDown()) {
+			const float v = endpoint_volume_get(id);
+			if (v >= 0.0f) {
+				QSignalBlocker block(volume_slider);
+				volume_slider->setValue(static_cast<int>(
+					std::lround(v * 100.0f)));
+			}
+		}
+		bool ok = false;
+		const bool muted = endpoint_volume_get_mute(id, &ok);
+		if (ok) {
+			QSignalBlocker block(mute_box);
+			mute_box->setChecked(muted);
+		}
+	}
+
 	// the stored selection. itemData carries the endpoint id ("@auto" /
 	// "@keep" for the modes), UserRole + 1 the raw endpoint name without
 	// the absent-state suffix. Rebuilds only when the content actually
@@ -1536,9 +1638,12 @@ private:
 		entries.append({QString::fromUtf8(nyan_text(
 					 "dock.monitor_out.auto")),
 				QStringLiteral("@auto"), QString()});
-		entries.append({QString::fromUtf8(nyan_text(
-					 "dock.monitor_out.keep")),
-				QStringLiteral("@keep"), QString()});
+		// "Leave as-is" only means "leave OBS's monitoring device alone"; the
+		// standalone manages its own output, so the host drops it (nyan_caps).
+		if (nyan_caps().obs_monitoring_keep)
+			entries.append({QString::fromUtf8(nyan_text(
+						 "dock.monitor_out.keep")),
+					QStringLiteral("@keep"), QString()});
 		nyan_enum_audio_outputs(
 			[](void *data, const char *name, const char *id) {
 				auto *e = static_cast<QList<entry_t> *>(data);
@@ -1606,7 +1711,7 @@ private:
 	QLabel *pose_label = nullptr;
 	QLabel *virtual_label = nullptr;
 	QLabel *screen_label = nullptr;
-	QCheckBox *connect_box = nullptr;
+	ToggleSwitch *connect_box = nullptr;
 	QFormLayout *device_form = nullptr;
 	QFormLayout *advanced_form = nullptr;
 	DockSection *status_section = nullptr;
@@ -1615,7 +1720,7 @@ private:
 	DockSection *screen_section = nullptr;
 	DockSection *remote_section = nullptr;
 	DockSection *advanced_section = nullptr;
-	QCheckBox *remote_enable_box = nullptr;
+	ToggleSwitch *remote_enable_box = nullptr;
 	QSpinBox *remote_port_spin = nullptr;
 	ClickableLabel *remote_qr_label = nullptr;
 	QLabel *remote_url_label = nullptr;
@@ -1631,16 +1736,24 @@ private:
 	QDoubleSpinBox *brightness_spin = nullptr;
 	QSlider *brightness_slider = nullptr;
 	QWidget *brightness_row = nullptr;
-	QCheckBox *autobright_box = nullptr;
-	QCheckBox *convergence_box = nullptr;
+	ToggleSwitch *autobright_box = nullptr;
+	ToggleSwitch *convergence_box = nullptr;
+	// Field wrappers for the two switches above, so setRowVisible can hide the
+	// whole row by device capability (the switch is nested in the wrapper).
+	QWidget *autobright_row = nullptr;
+	QWidget *convergence_row = nullptr;
 	QComboBox *display_mode_combo = nullptr;
 	QLabel *eye_label = nullptr;
 	QPushButton *eye_button = nullptr;
+	// Recenter / gyro-bias recalibrate: act on the IMU, so they are disabled
+	// while the glasses are not connected (refresh() toggles them).
+	QPushButton *recenter = nullptr;
+	QPushButton *recalibrate = nullptr;
 	QComboBox *sbs_combo = nullptr;
-	int last_transport = -1; // imu_transport value last applied to row visibility
+	int last_visibility_model = -1; // model_id last applied to row visibility
 	QDoubleSpinBox *prediction_spin = nullptr;
 	QSlider *prediction_slider = nullptr;
-	QCheckBox *fov_auto_box = nullptr;
+	ToggleSwitch *fov_auto_box = nullptr;
 	QDoubleSpinBox *fov_spin = nullptr;
 	QSlider *fov_slider = nullptr;
 	// Row container of the distance slider; refresh() rewrites its
@@ -1654,14 +1767,19 @@ private:
 	QSlider *size_slider = nullptr;
 	QDoubleSpinBox *curve_spin = nullptr;
 	QSlider *curve_slider = nullptr;
+	ToggleSwitch *offscreen_box = nullptr;
+	FocusComboBox *focus_combo = nullptr;
 	QDoubleSpinBox *ipd_spin = nullptr;
 	QSlider *ipd_slider = nullptr;
-	QCheckBox *mag_yaw_box = nullptr;
-	QCheckBox *debug_box = nullptr;
+	ToggleSwitch *mag_yaw_box = nullptr;
+	ToggleSwitch *debug_box = nullptr;
 	QPushButton *projector_button = nullptr;
-	QCheckBox *auto_projector_box = nullptr;
+	ToggleSwitch *auto_projector_box = nullptr;
 	QComboBox *monitor_combo = nullptr;
-	QCheckBox *cursor_fence_box = nullptr;
+	QWidget *volume_row = nullptr;
+	QSlider *volume_slider = nullptr;
+	ToggleSwitch *mute_box = nullptr;
+	ToggleSwitch *cursor_fence_box = nullptr;
 	// Auto-open latch: one projector per glasses-display connection,
 	// re-armed when a virtual screen source first appears.
 	bool auto_projector_opened = false;

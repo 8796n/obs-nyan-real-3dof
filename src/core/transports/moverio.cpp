@@ -307,6 +307,31 @@ static int moverio_query_autobright(HANDLE h)
 	return moverio_query_value(h, "getautobright", 1);
 }
 
+// 2D/3D display switch (Basic Function SDK get2d3d/set2d3d): 0 = 2D, 1 = 3D
+// (side-by-side / Half-SBS). -1 = no parsable reply. The command name itself
+// contains the digits 2/3, so a first-digit scan (moverio_query_value) would
+// latch onto the echoed command instead of the value; look for the value
+// character 0/1 specifically (the only 0/1 the reply can contain).
+static int moverio_query_2d3d(HANDLE h)
+{
+	char reply[64] = "";
+	if (!moverio_serial_command(h, "get2d3d", reply, sizeof(reply)))
+		return -1;
+	for (const char *p = reply; *p; ++p)
+		if (*p == '0' || *p == '1')
+			return *p - '0';
+	// The value may land in a later read chunk (after the echoed command).
+	char more[32] = "";
+	DWORD got = 0;
+	if (ReadFile(h, more, sizeof(more) - 1, &got, nullptr) && got) {
+		more[got] = '\0';
+		for (const char *p = more; *p; ++p)
+			if (*p == '0' || *p == '1')
+				return *p - '0';
+	}
+	return -1;
+}
+
 // setdisplaydistance value range per the Basic Function SDK: horizontal
 // image shift in pixels, positive pulls the perceived display plane nearer.
 constexpr int DISPLAY_DISTANCE_PX_MIN = -32;
@@ -475,16 +500,24 @@ void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch)
 		     mag != nullptr);
 
 	// Display-control serial port for brightness. Optional: the IMU works
-	// without it and the dock disables the brightness row when absent.
+	// without it and the dock disables the brightness row when absent. Probe
+	// each command only on models that have it: BT-40 and BT-30C both have
+	// manual brightness; only the BT-40 has auto-brightness.
 	HANDLE serial = open_moverio_serial(entry.vid, entry.pid);
+	const bool open = serial != INVALID_HANDLE_VALUE;
 	f->brightness_current.store(
-		serial != INVALID_HANDLE_VALUE ? moverio_query_brightness(serial)
-					       : -1,
+		open && entry.profile.display_brightness
+			? moverio_query_brightness(serial)
+			: -1,
 		std::memory_order_relaxed);
 	f->autobright_current.store(
-		serial != INVALID_HANDLE_VALUE ? moverio_query_autobright(serial)
-					       : -1,
+		open && entry.profile.display_autobright
+			? moverio_query_autobright(serial)
+			: -1,
 		std::memory_order_relaxed);
+	// 2D/3D (Half-SBS) display mode: all MOVERIO support it via the same port.
+	f->display_mode_current.store(open ? moverio_query_2d3d(serial) : -1,
+				      std::memory_order_relaxed);
 	if (f->debug_log.load(std::memory_order_relaxed))
 		nyan_log(NYAN_LOG_INFO,
 		     "[obs-nyan-real-3dof] MOVERIO serial %s (brightness %d, "
@@ -530,6 +563,10 @@ void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch)
 	// factory default 0 instead of "leave the device alone", so toggling
 	// the link off restores the default even across rate-limited retries.
 	bool dd_hold_default = false;
+	// Whether this session ever wrote a non-factory hardware convergence, so
+	// the exit path restores 0 only when we actually moved it (an untouched
+	// device is left alone).
+	bool dd_touched = false;
 	uint64_t last_dd_send_ns = 0;
 
 	while (!f->stop.load(std::memory_order_relaxed) &&
@@ -583,19 +620,57 @@ void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch)
 				     auto_req, reply, now_auto, now_bright);
 		}
 
+		// 2D/3D (Half-SBS) switch: set2d3d 0/1, then re-read get2d3d.
+		const int mode_req = f->display_mode_request.exchange(
+			-1, std::memory_order_relaxed);
+		if (mode_req >= 0 && serial != INVALID_HANDLE_VALUE) {
+			char cmd[32];
+			char reply[32] = "";
+			snprintf(cmd, sizeof(cmd), "set2d3d %d", mode_req ? 1 : 0);
+			moverio_serial_command(serial, cmd, reply, sizeof(reply));
+			const int now_mode = moverio_query_2d3d(serial);
+			f->display_mode_current.store(
+				now_mode >= 0 ? now_mode : mode_req,
+				std::memory_order_relaxed);
+			if (f->debug_log.load(std::memory_order_relaxed))
+				nyan_log(NYAN_LOG_INFO,
+					 "[obs-nyan-real-3dof] set2d3d %d -> reply "
+					 "'%s', get2d3d %d",
+					 mode_req, reply, now_mode);
+		}
+
 		// Convergence link: while on, keep the hardware display plane
 		// at the dock's screen distance. Writes are rate-limited so
 		// slider drags update live without flooding the command port.
 		if (dd_applied != INT32_MIN) {
 			const bool link = f->convergence_link.load(
 				std::memory_order_relaxed);
+			// SBS (3D) rendering already carries geometric
+			// convergence from the per-eye IPD parallax
+			// (warp_params), so pin the hardware shift to factory 0
+			// while side-by-side is active - otherwise the two stack
+			// and the depth doubles. The link only drives the
+			// hardware plane in 2D (mono) output. Matches
+			// sbs_output_active() for the sensor_api path (this loop
+			// already ran the transport check), minus the double-
+			// wide test a MOVERIO can never hit.
+			const int sbs_mode =
+				f->sbs_output.load(std::memory_order_relaxed);
+			const bool sbs_active =
+				sbs_mode == 1 ||
+				(sbs_mode != 2 &&
+				 f->display_mode_current.load(
+					 std::memory_order_relaxed) == 1);
 			if (link)
 				dd_hold_default = true;
 			const int target =
-				link ? convergence_shift_px(
-					       f->screen_distance_m.load(
-						       std::memory_order_relaxed))
-				     : (dd_hold_default ? 0 : dd_applied);
+				sbs_active
+					? 0
+					: (link ? convergence_shift_px(
+							  f->screen_distance_m.load(
+								  std::memory_order_relaxed))
+						: (dd_hold_default ? 0
+								   : dd_applied));
 			const uint64_t now = nyan_now_ns();
 			if (target != dd_applied &&
 			    now - last_dd_send_ns > 200000000ULL) {
@@ -614,6 +689,7 @@ void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch)
 				f->display_distance_current.store(
 					dd_applied, std::memory_order_relaxed);
 				last_dd_send_ns = now;
+				dd_touched = true;
 				if (f->debug_log.load(
 					    std::memory_order_relaxed))
 					nyan_log(NYAN_LOG_INFO,
@@ -692,11 +768,28 @@ void run_sensor_api_session(device_manager *f, uint32_t &seen_epoch)
 		std::this_thread::sleep_for(std::chrono::milliseconds(2));
 	}
 
+	// Restore the factory convergence (0 = 4.6 m) before releasing the
+	// device, so a hardware shift applied for the convergence link does not
+	// persist after the app exits, the master toggle is turned off, or the
+	// glasses disconnect. Only when this session moved it (dd_touched) and
+	// it is not already 0 - if the glasses are physically gone the write
+	// just fails harmlessly.
+	if (serial != INVALID_HANDLE_VALUE && dd_touched &&
+	    dd_applied != INT32_MIN && dd_applied != 0) {
+		char reply[32] = "";
+		moverio_serial_command(serial, "setdisplaydistance 0", reply,
+				       sizeof(reply));
+		if (f->debug_log.load(std::memory_order_relaxed))
+			nyan_log(NYAN_LOG_INFO,
+				 "[obs-nyan-real-3dof] restored "
+				 "setdisplaydistance 0 on disconnect");
+	}
 	if (serial != INVALID_HANDLE_VALUE)
 		CloseHandle(serial);
 	f->brightness_current.store(-1, std::memory_order_relaxed);
 	f->autobright_current.store(-1, std::memory_order_relaxed);
 	f->display_distance_current.store(INT32_MIN, std::memory_order_relaxed);
+	f->display_mode_current.store(-1, std::memory_order_relaxed);
 	gyro->Release();
 	accel->Release();
 	if (mag)

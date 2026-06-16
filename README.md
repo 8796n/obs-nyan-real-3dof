@@ -235,7 +235,8 @@ wall が切れる）や、OBS のキャンバス自体に wall 全体を映し�
 機種（XREAL One / One Pro / 1S / ROG XREAL R1 / Air / Air 2、RayNeo Air 系、EPSON MOVERIO BT-40 / BT-30C、Rokid Max / Air、VITURE One / One Lite / Pro、Nreal Light）は HID で
 自動判別され、HID が取れてから接続とワープが開始します。装着オフセットと表示 FOV は
 判別したデバイスに合わせて設定され、`FOV をデバイスから自動設定` を OFF にすると FOV を
-手動で調整できます。
+手動で調整できます。機種ごとの解像度・対角 FoV・専用機能・実機確認状況の一覧は
+[docs/devices.md](docs/devices.md) を参照してください。
 
 判別テーブルはユーザーが拡張できます。`%AppData%\obs-studio\plugin_config\obs-nyan-real-3dof\devices.json`
 を置くと、再ビルドなしで機種の追加や組み込みプロファイルの上書きができます（書式は同梱の

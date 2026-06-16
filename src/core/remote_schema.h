@@ -17,3 +17,12 @@ void remote_schema_build_cfg(nyan_json &cfg);
 // Applies a {"t":"set","k":...,"v":...} message from the page through the
 // same table (whitelist + range clamp). Any thread. False for unknown keys.
 bool remote_schema_apply(const nyan_json &msg);
+
+// Host-specific extra rows on the remote settings screen. The host appends its
+// own sections (same JSON shape build_cfg produces) and applies "set" messages
+// for its own keys, so host-only settings (the standalone's Display / Audio
+// Wall) reach the phone without core knowing them. Unset by default - OBS keeps
+// these per source, so it adds nothing and the mirror shows only shared (
+// g_device) controls. build runs on the UI thread; apply on the WS thread.
+void remote_schema_set_host_provider(void (*build)(nyan_json &sections),
+				     bool (*apply)(const nyan_json &msg));

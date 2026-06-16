@@ -13,3 +13,11 @@ void manager_apply_settings(device_manager *f, obs_data_t *settings);
 void manager_save_load(obs_data_t *save_data, bool saving, void *private_data);
 void recenter_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey,
 		     bool pressed);
+void focus_next_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey,
+		       bool pressed);
+void focus_prev_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey,
+		       bool pressed);
+void focus_off_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey,
+		      bool pressed);
+void pose_follow_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey,
+			bool pressed);

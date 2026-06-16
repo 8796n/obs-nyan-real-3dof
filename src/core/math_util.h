@@ -104,6 +104,26 @@ static quatd quat_derivative(quatd q, double wx, double wy, double wz)
 	return {0.5 * m.w, 0.5 * m.x, 0.5 * m.y, 0.5 * m.z};
 }
 
+// Extrapolates the pose forward by prediction_ms using its angular velocity, to
+// cut motion-to-photon latency. Returns the pose quaternion unchanged when not
+// calibrated or stationary. Shared by both renderers (OBS source / standalone).
+static quatd predict_pose(const pose_snapshot &p, float prediction_ms)
+{
+	quatd q = p.q;
+	const double dt = clampd(prediction_ms, 0.0, 50.0) / 1000.0;
+	const double wn = std::sqrt(p.omega.x * p.omega.x +
+				    p.omega.y * p.omega.y + p.omega.z * p.omega.z);
+	if (p.calibrated && std::isfinite(wn) && wn > 1e-6 && dt > 0.0) {
+		const double angle = wn * dt;
+		const double h = 0.5 * angle;
+		const double s = std::sin(h) / wn;
+		const quatd dq = {std::cos(h), p.omega.x * s, p.omega.y * s,
+				  p.omega.z * s};
+		q = quat_normalize(quat_multiply(q, dq));
+	}
+	return q;
+}
+
 static double yaw_from_quat_heading(quatd q, double fallback = 0.0)
 {
 	const vec3d f = rotate_vector(quat_normalize(q), {0.0, 0.0, -1.0});

@@ -40,6 +40,10 @@ struct device_manager {
 	std::mutex state_mutex;
 	head_tracker tracker;
 	pose_snapshot pose;
+	// Whether the view was auto-squared since this connection. Set on the
+	// first calibrated pose after (re)connect (auto-recenter), reset when the
+	// model changes (connect/disconnect). Guarded by state_mutex.
+	bool auto_recentered = false;
 
 	std::thread worker;
 	std::thread detect_worker;
@@ -82,6 +86,20 @@ struct device_manager {
 	// restores the factory default 0.
 	std::atomic<int> display_distance_current{INT32_MIN};
 	std::atomic<bool> convergence_link{false};
+	// Off-screen direction indicator: glow the view edge toward the virtual
+	// screen when it leaves the view (dock-driven, persisted, default on).
+	std::atomic<bool> offscreen_indicator{true};
+	// Head-pose follow (3DoF). Off = the screen is locked to the view (a flat
+	// head-locked mirror). Dock/remote/hotkey driven, persisted, default on.
+	std::atomic<bool> pose_follow{true};
+	// Focus mode: restrict the Display Wall to a single monitor by its Windows
+	// number (0 = off / whole wall). Persisted. Bumps wall_rebuild_gen so the
+	// backends rebuild their wall; set via manager_set_focus_display.
+	std::atomic<int> focus_display{0};
+	std::atomic<uint32_t> wall_rebuild_gen{0};
+	// Bumped by manager_recenter so a backend can react to a recenter (the
+	// standalone snaps the cursor to the view center). Not persisted.
+	std::atomic<uint32_t> recenter_gen{0};
 	// Display mode over the device command channel (air_hid MI_04 binary
 	// protocol / nreal_hid MCU ASCII protocol). Values are the family's
 	// protocol mode values from transport_traits.display_modes.
@@ -133,11 +151,17 @@ struct device_manager {
 	// texture's aspect, FOV and size factor). 0 until a virtual screen
 	// renders; the Audio Wall derives exact audio bearings from it.
 	std::atomic<float> screen_half_width_m{0.0f};
-	// Yaw the render path subtracts from the world so the Display Wall's
-	// chosen center display faces forward (degrees, + = the chosen point
-	// was right of the wall center). Published with screen_half_width_m;
-	// the Audio Wall subtracts it so bearings keep matching the picture.
+	// Center-display offset, published with screen_half_width_m so the Audio
+	// Wall keeps bearings matching the picture. Two cases, since you cannot view
+	// a flat surface face-on by rotating:
+	//  - Cylinder (curve>0): the render path yaws the world by this many degrees
+	//    so the chosen column faces forward (+ = chosen point right of centre);
+	//    screen_center_off_m stays 0.
+	//  - Flat (curve<=0): the render path instead slides the viewer sideways by
+	//    screen_center_off_m metres to stand in front of the chosen display
+	//    (seen face-on, not obliquely); screen_yaw_offset_deg stays 0.
 	std::atomic<float> screen_yaw_offset_deg{0.0f};
+	std::atomic<float> screen_center_off_m{0.0f};
 
 	std::mutex settings_mutex;
 	std::string ip = "169.254.2.1";
@@ -201,5 +225,11 @@ void manager_dolly_step(device_manager *f, double steps);
 void manager_apply_model_settings(device_manager *f);
 void manager_set_mag_yaw(device_manager *f, bool enabled);
 void manager_set_connect_enabled(device_manager *f, bool enabled);
+// Focus mode: show only the monitor with this Windows number (0 = whole wall).
+// Bumps wall_rebuild_gen so the backends rebuild their wall.
+void manager_set_focus_display(device_manager *f, int windows_number);
+// Cycle focus through [whole wall, display1, display2, ...]; dir +1 = next,
+// -1 = previous (wraps). Shared by the OBS hotkeys and the phone remote.
+void manager_focus_cycle(device_manager *f, int dir);
 void manager_set_network(device_manager *f, const std::string &ip, int port);
 void manager_reset_defaults(device_manager *f);
