@@ -1,17 +1,17 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 8796n <info@8796.jp>
 // Hooks media elements with Web Audio: createMediaElementSource detaches
 // their sound from the OS output entirely, a ScriptProcessor taps the PCM,
 // and the samples go to the service worker (which relays them to the
 // nyan Real Audio Wall over WebSocket). Locally the tab is silent - the
-// only audible path is OBS monitoring, so nothing plays twice.
+// only audible path is nyan Real monitoring, so nothing plays twice.
 "use strict";
 
 let port = null;
 let ctx = null;
 let mixBus = null;
 let muteLeg = null; // zero-gain path that keeps the tap pulled by the graph
-let localGain = null; // fallback to the speakers while OBS is unreachable
+let localGain = null; // fallback to the speakers while nyan Real is unreachable
 const hooked = new WeakSet();
 let silentBuffers = 0;
 let posTimer = null;
@@ -19,7 +19,7 @@ let lastCx = Number.NaN;
 
 function setLocalPlayback(enabled) {
   if (!localGain) return;
-  // Short ramp avoids clicks when OBS appears/disappears.
+  // Short ramp avoids clicks when nyan Real appears/disappears.
   localGain.gain.setTargetAtTime(enabled ? 1 : 0, ctx.currentTime, 0.05);
 }
 
@@ -31,7 +31,7 @@ function ensurePort() {
     return null; // extension reloaded; next call retries
   }
   port.onMessage.addListener((msg) => {
-    // Connection state of the OBS-side WebSocket: while it is down the
+    // Connection state of the nyan Real-side WebSocket: while it is down the
     // audio falls back to normal local playback instead of going silent.
     if (msg.type === "ws") setLocalPlayback(!msg.connected);
   });
@@ -53,7 +53,7 @@ function toBase64(bytes) {
 }
 
 // Interleaved s16 PCM out toward the service worker, with a silence
-// throttle that still trickles enough to keep the OBS side's 5 s stream
+// throttle that still trickles enough to keep the nyan Real side's 5 s stream
 // timeout from firing on a paused tab.
 function sendPcmBytes(bytes) {
   const pcm = new Int16Array(bytes.buffer, bytes.byteOffset,
@@ -130,7 +130,7 @@ function ensureAudio() {
   muteLeg.gain.value = 0;
   muteLeg.connect(ctx.destination);
   // Local fallback leg: audible until the service worker reports a live
-  // OBS connection, and again whenever it drops.
+  // nyan Real connection, and again whenever it drops.
   localGain = ctx.createGain();
   localGain.gain.value = 1;
   mixBus.connect(localGain);

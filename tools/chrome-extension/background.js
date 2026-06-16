@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 8796n <info@8796.jp>
 // Service worker: multiplexes the content scripts' PCM onto one WebSocket
 // to the nyan Real Audio Wall (ws://127.0.0.1:<port>) and reports each
@@ -132,7 +132,7 @@ async function sendAllMeta() {
   for (const entry of streams.values()) await sendMeta(entry);
 }
 
-// Tells every streaming tab whether OBS is reachable; the content scripts
+// Tells every streaming tab whether nyan Real is reachable; the content scripts
 // fall back to normal local playback while it is not.
 function broadcastWsState() {
   for (const p of streams.keys()) {

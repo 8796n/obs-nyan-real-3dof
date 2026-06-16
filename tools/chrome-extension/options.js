@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 8796n <info@8796.jp>
 "use strict";
 
 // Visible strings come from _locales/ so the page follows the browser's UI

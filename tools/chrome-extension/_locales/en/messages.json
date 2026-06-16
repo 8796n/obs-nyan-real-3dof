@@ -4,11 +4,11 @@
     "description": "Extension name (brand, kept identical across locales)."
   },
   "ext_desc": {
-    "message": "Sends tab audio and window positions to the nyan Real Audio Wall OBS source over a local WebSocket, so each browser window sounds from where it is on the virtual screen.",
+    "message": "Sends tab audio and window positions to nyan Real's Audio Wall (the OBS plugin or the standalone Spatial Wall app) over a local WebSocket, so each browser window sounds from where it is on the virtual screen.",
     "description": "Extension description shown in chrome://extensions and the store listing."
   },
   "options_port_label": {
-    "message": "WebSocket port (the same number as \"Browser link port\" in the OBS nyan Real Audio Wall source):"
+    "message": "WebSocket port (match the Audio Wall port in nyan Real - the OBS plugin or standalone Spatial Wall; default 8796):"
   },
   "options_save": {
     "message": "Save"
@@ -17,6 +17,6 @@
     "message": "Saved"
   },
   "options_note": {
-    "message": "Audio from playing tabs is heard only through OBS (the tab itself goes silent)."
+    "message": "Audio from playing tabs is heard only through nyan Real (the tab itself goes silent)."
   }
 }
