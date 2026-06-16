@@ -3,7 +3,7 @@
     "message": "nyan Real Audio Wall connector"
   },
   "ext_desc": {
-    "message": "再生中のタブ音声とウィンドウ位置をローカル WebSocket で nyan Real の Audio Wall（OBS プラグイン版 / 単独版 Spatial Wall）へ送り、ブラウザの各ウィンドウが仮想スクリーン上の位置から聞こえるようにします。"
+    "message": "再生中のタブ音声とウィンドウ位置を nyan Real の Audio Wall（OBS版/単独版）へ送り、各ウィンドウがその位置から空間音響で鳴ります。"
   },
   "options_port_label": {
     "message": "WebSocket ポート（nyan Real の Audio Wall のポートと同じ番号。OBS版・単独版とも既定 8796）:"

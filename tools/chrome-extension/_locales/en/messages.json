@@ -4,7 +4,7 @@
     "description": "Extension name (brand, kept identical across locales)."
   },
   "ext_desc": {
-    "message": "Sends tab audio and window positions to nyan Real's Audio Wall (the OBS plugin or the standalone Spatial Wall app) over a local WebSocket, so each browser window sounds from where it is on the virtual screen.",
+    "message": "Sends tab audio + window position to nyan Real's Audio Wall (OBS or standalone) so each tab sounds from where its window is.",
     "description": "Extension description shown in chrome://extensions and the store listing."
   },
   "options_port_label": {
